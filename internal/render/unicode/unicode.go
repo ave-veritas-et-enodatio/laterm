@@ -124,6 +124,15 @@ func handleBackslash(expr string, i, n int, b *strings.Builder) int {
 		return handleSqrt(expr, j, n, b)
 	}
 
+	// Font-style commands: \mathcal{M} → render content (M).
+	// Unicode cannot represent most font variants, so we strip the
+	// style and render the argument.
+	if fontStyleCommands[cmd] {
+		arg, end := extractArg(expr, j, n)
+		b.WriteString(renderExpr(arg))
+		return end
+	}
+
 	// Regular command lookup.
 	if repl, ok := commands[cmd]; ok {
 		b.WriteString(repl)
@@ -191,9 +200,7 @@ func handleScript(expr string, i, n int, b *strings.Builder, table map[rune]rune
 	if expr[i] == '{' {
 		content, end = extractBraced(expr, i, n)
 	} else {
-		// Single character after ^ or _.
-		content = string(expr[i])
-		end = i + 1
+		content, end = extractArg(expr, i, n)
 	}
 
 	// First, recursively render any LaTeX commands within the content.
@@ -217,9 +224,9 @@ func handleScript(expr string, i, n int, b *strings.Builder, table map[rune]rune
 		// Fallback: prefix notation.
 		b.WriteByte(prefix)
 		if len(rendered) > 1 {
-			b.WriteByte('{')
+			b.WriteByte('(')
 			b.WriteString(rendered)
-			b.WriteByte('}')
+			b.WriteByte(')')
 		} else {
 			b.WriteString(rendered)
 		}

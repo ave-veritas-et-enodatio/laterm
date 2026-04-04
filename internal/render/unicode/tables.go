@@ -211,6 +211,29 @@ var subscripts = map[rune]rune{
 	'v': 'ᵥ', 'x': 'ₓ',
 }
 
+// fontStyleCommands are LaTeX commands that apply a font variant to
+// their argument. Unicode terminal output cannot represent these styles,
+// so we strip the command and render the argument content.
+var fontStyleCommands = map[string]bool{
+	"mathcal":      true,
+	"mathrm":       true,
+	"mathbf":       true,
+	"mathit":       true,
+	"mathbb":       true,
+	"mathfrak":     true,
+	"mathsf":       true,
+	"mathtt":       true,
+	"text":         true,
+	"textrm":       true,
+	"textbf":       true,
+	"textit":       true,
+	"texttt":       true,
+	"textsf":       true,
+	"operatorname": true,
+	"boldsymbol":   true,
+	"bm":           true,
+}
+
 // stripCommands are LaTeX commands that should be removed entirely from
 // the output — they are layout hints with no visible content.
 var stripCommands = map[string]bool{

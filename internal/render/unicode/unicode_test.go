@@ -97,7 +97,7 @@ func TestRender_Superscripts(t *testing.T) {
 		{name: "plus sign", expr: `x^{n+1}`, want: "xⁿ⁺¹"},
 		{name: "minus sign", expr: `x^{-1}`, want: "x⁻¹"},
 		{name: "no unicode form fallback", expr: `x^{q}`, want: "x^q"},
-		{name: "multi char no form", expr: `x^{qz}`, want: "x^{qz}"},
+		{name: "multi char no form", expr: `x^{qz}`, want: "x^(qz)"},
 	}
 
 	for _, tt := range tests {
@@ -448,7 +448,7 @@ func TestRender_ComplexExpressions(t *testing.T) {
 			// π has no Unicode superscript form, so the whole exponent
 			// falls back to prefix notation.
 			expr: `e^{i\pi} + 1 = 0`,
-			want: "e^{iπ} + 1 = 0",
+			want: "e^(iπ) + 1 = 0",
 		},
 		{
 			name: "quadratic formula",
