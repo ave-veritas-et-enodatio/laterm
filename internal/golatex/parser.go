@@ -65,7 +65,7 @@ func (p *parser) next() token.Token {
 func (p *parser) expect(v rune) {
 	p.next()
 	if p.s.tok.Text != string(v) {
-		panic(fmt.Errorf("expected %q, got %q", v, p.s.tok.Text))
+		panic(fmt.Errorf("golatex.parser.expect: expected %q, got %q (pos %d)", v, p.s.tok.Text, p.s.tok.Pos))
 	}
 }
 
@@ -95,13 +95,14 @@ func (p *parser) parseNode(tok token.Token) ast.Node {
 		case mathState:
 			return p.parseMathLbrace(tok)
 		default:
-			panic("not implemented")
+			// Lbrace outside math mode: treat as a grouping and parse
+			// the contents the same way as math-mode braces.
+			return p.parseMathLbrace(tok)
 		}
 	case token.Other:
-		switch tok.Text {
-		default:
-			panic("not implemented: " + tok.String())
-		}
+		// Unhandled token kind -- return as a Symbol so parsing can continue
+		// instead of panicking. The downstream renderer may ignore it.
+		return &ast.Symbol{SymPos: tok.Pos, Text: tok.Text}
 	case token.Space:
 		switch p.state {
 		case mathState:
@@ -139,9 +140,9 @@ func (p *parser) parseMathExpr(tok token.Token) ast.Node {
 	case `\[`:
 		end = `\]`
 	case `\begin`:
-		panic("not implemented")
+		panic(fmt.Errorf("golatex.parseMathExpr: \\begin{...} environments not implemented (pos %d)", tok.Pos))
 	default:
-		panic(fmt.Errorf("opening math-expression delimiter %q not supported", tok.Text))
+		panic(fmt.Errorf("golatex.parseMathExpr: opening math-expression delimiter %q not supported (pos %d)", tok.Text, tok.Pos))
 	}
 
 loop:
@@ -166,8 +167,11 @@ func (p *parser) parseMacro(tok token.Token) ast.Node {
 	name := tok.Text
 	macro, ok := p.macros[name]
 	if !ok {
-		panic("unknown macro " + name)
-		//return nil
+		// Unknown macro -- return as a bare Macro node with no args so
+		// downstream layers can attempt symbol lookup or ignore it.
+		return &ast.Macro{
+			Name: &ast.Ident{NamePos: tok.Pos, Name: name},
+		}
 	}
 	return macro.parseMacro(p)
 }

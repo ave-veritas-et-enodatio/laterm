@@ -201,7 +201,7 @@ var (
 		`\deg`:    builtinMacro(""),
 		`\det`:    builtinMacro(""),
 		`\dim`:    builtinMacro(""),
-		`\exp`:    builtinMacro("A"),
+		`\exp`:    builtinMacro(""),
 		`\gcd`:    builtinMacro(""),
 		`\hom`:    builtinMacro(""),
 		`\inf`:    builtinMacro(""),
@@ -343,16 +343,102 @@ func (m builtinMacro) Handle(p *parser, n ast.Node, state tex.State, math bool) 
 		return tex.NewChar(node.Name.Name, state, math)
 	}
 
+	name := node.Name.Name
+
+	// Two-arg macros like \stackrel — handle before the general loop.
+	if string(m) == "AA" {
+		return handleBuiltinTwoArg(p, node, name, state, math)
+	}
+
+	// Dispatch based on signature characters.
+	// 'a' = required arg, 'o' = optional arg.
+	// argIndex tracks which argument in node.Args we consume next.
+	argIndex := 0
+	var lastResult tex.Node
 	for _, typ := range strings.ToLower(string(m)) {
 		switch typ {
-		case 'a':
-			panic("not implemented")
 		case 'o':
-			panic("not implemented")
-		case 'v':
-			panic("not implemented")
+			// Optional argument — consumed but not used by builtinMacro
+			// (only sqrt uses it, and sqrt has its own handler).
+			argIndex++
+		case 'a':
+			lastResult = handleBuiltinArg(p, node, name, argIndex, state, math)
+			argIndex++
 		}
 	}
 
-	return nil
+	if lastResult != nil {
+		return lastResult
+	}
+	// Fallback: render as a plain character.
+	return tex.NewChar(name, state, math)
+}
+
+// handleBuiltinArg handles a single required-argument macro dispatched through
+// the builtinMacro table. It covers \math*, \text*, and \operatorname.
+func handleBuiltinArg(p *parser, node *ast.Macro, name string, argIndex int, state tex.State, math bool) tex.Node {
+	if argIndex >= len(node.Args) {
+		// Missing argument — degrade gracefully to plain text.
+		return tex.NewChar(name, state, math)
+	}
+	arg, ok := node.Args[argIndex].(*ast.Arg)
+	if !ok {
+		return tex.NewChar(name, state, math)
+	}
+
+	switch {
+	// Math font commands: \mathcal, \mathbb, \mathbf, etc.
+	case strings.HasPrefix(name, `\math`):
+		fontType := name[5:] // strip `\math` prefix
+		state.Font.Type = fontType
+		return p.handleNode(ast.List(arg.List), state, math)
+
+	// Text font commands: \textbf, \textit, etc.
+	case strings.HasPrefix(name, `\text`):
+		fontType := name[5:] // strip `\text` prefix
+		state.Font.Type = fontType
+		return p.handleNode(ast.List(arg.List), state, false)
+
+	// \operatorname{...}: render argument content in roman font,
+	// one character at a time, like handleFunction.
+	case name == `\operatorname`:
+		state.Font.Type = "rm"
+		var nodes []tex.Node
+		for _, child := range arg.List {
+			nodes = append(nodes, p.handleNode(child, state, math))
+		}
+		return tex.HListOf(nodes, true)
+
+	default:
+		// Unknown single-arg macro — process the argument with current state.
+		return p.handleNode(ast.List(arg.List), state, math)
+	}
+}
+
+// handleBuiltinTwoArg handles two-argument macros dispatched through the
+// builtinMacro table. Currently this covers \stackrel{A}{B} only; \frac,
+// \binom, etc. have dedicated handlers that take priority in handler().
+func handleBuiltinTwoArg(p *parser, node *ast.Macro, name string, state tex.State, math bool) tex.Node {
+	if len(node.Args) < 2 {
+		return tex.NewChar(name, state, math)
+	}
+	arg0, ok0 := node.Args[0].(*ast.Arg)
+	arg1, ok1 := node.Args[1].(*ast.Arg)
+	if !ok0 || !ok1 {
+		return tex.NewChar(name, state, math)
+	}
+
+	switch name {
+	case `\stackrel`:
+		// \stackrel{A}{B}: place A (shrunk) centered above B, no fraction rule.
+		top := p.handleNode(ast.List(arg0.List), state, math)
+		bot := p.handleNode(ast.List(arg1.List), state, math)
+		return p.genfrac("", "", 0, textStyle, top, bot, state)
+
+	default:
+		// Generic two-arg: just render both arguments sequentially.
+		n0 := p.handleNode(ast.List(arg0.List), state, math)
+		n1 := p.handleNode(ast.List(arg1.List), state, math)
+		return tex.HListOf([]tex.Node{n0, n1}, true)
+	}
 }

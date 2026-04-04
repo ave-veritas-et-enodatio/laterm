@@ -9,6 +9,7 @@ import (
 
 	"github.com/benn-herrera/laterm/internal/golatex/ast"
 	"github.com/benn-herrera/laterm/internal/golatex/internal/tex2unicode"
+	"github.com/benn-herrera/laterm/internal/golatex/token"
 )
 
 type macroParser interface {
@@ -320,11 +321,49 @@ func (p *parser) addBuiltinMacros() {
 		`\vdots`:  builtinMacro(""),
 		`\hspace`: builtinMacro("A"),
 
+		// accents (one required arg each)
+		`\hat`:   builtinMacro("A"),
+		`\tilde`: builtinMacro("A"),
+		`\vec`:   builtinMacro("A"),
+		`\bar`:   builtinMacro("A"),
+		`\dot`:   builtinMacro("A"),
+		`\ddot`:  builtinMacro("A"),
+		`\breve`: builtinMacro("A"),
+		`\acute`: builtinMacro("A"),
+		`\grave`: builtinMacro("A"),
+		`\check`: builtinMacro("A"),
+
+		// text and font commands
+		`\text`:       builtinMacro("A"),
+		`\mathrm`:     builtinMacro("A"),
+		`\boldsymbol`: builtinMacro("A"),
+
+		// invisible box / spacing
+		`\phantom`: builtinMacro("A"),
+
+		// style switches (no args -- apply to rest of group)
+		`\displaystyle`: builtinMacro(""),
+		`\textstyle`:    builtinMacro(""),
+
+		// over/under braces
+		`\underbrace`: builtinMacro("A"),
+		`\overbrace`:  builtinMacro("A"),
+
+		// negation modifier (one required arg)
+		`\not`: builtinMacro("A"),
+
+		// color (consume color name arg; ignore)
+		`\color`: builtinMacro("A"),
+
 		// catch-all
 		//
 		`\overline`:     builtinMacro("A"),
 		`\operatorname`: builtinMacro("A"),
 	}
+
+	// \left ... \right requires custom parsing: read a delimiter token,
+	// collect content until \right, then read the closing delimiter.
+	p.macros[`\left`] = funcMacro(parseLeftRight)
 
 	// add all known UTF-8 symbols
 	for _, k := range tex2unicode.Symbols() {
@@ -335,6 +374,11 @@ func (p *parser) addBuiltinMacros() {
 		p.macros[`\`+k] = builtinMacro("")
 	}
 }
+
+// funcMacro adapts a plain function to the macroParser interface.
+type funcMacro func(p *parser) ast.Node
+
+func (f funcMacro) parseMacro(p *parser) ast.Node { return f(p) }
 
 type builtinMacro string
 
@@ -358,4 +402,59 @@ func (m builtinMacro) parseMacro(p *parser) ast.Node {
 	}
 
 	return node
+}
+
+// parseLeftRight handles \left<delim> ... \right<delim>.
+//
+// It reads the next token as the left delimiter, collects all nodes until a
+// \right macro is encountered, then reads the token after \right as the right
+// delimiter. The result is an *ast.Macro with Name="\left" and three Args:
+//
+//	Args[0]: left delimiter  (Symbol text)
+//	Args[1]: content between \left and \right
+//	Args[2]: right delimiter (Symbol text)
+func parseLeftRight(p *parser) ast.Node {
+	pos := p.s.tok.Pos
+
+	ldelim := p.readDelimToken()
+
+	var content ast.List
+	for p.s.Next() {
+		if p.s.tok.Kind == token.Macro && p.s.tok.Text == `\right` {
+			break
+		}
+		node := p.parseNode(p.s.tok)
+		if node != nil {
+			content = append(content, node)
+		}
+	}
+
+	rdelim := p.readDelimToken()
+
+	return &ast.Macro{
+		Name: &ast.Ident{NamePos: pos, Name: `\left`},
+		Args: ast.List{
+			&ast.Arg{List: ast.List{&ast.Symbol{Text: ldelim}}},
+			&ast.Arg{List: content},
+			&ast.Arg{List: ast.List{&ast.Symbol{Text: rdelim}}},
+		},
+	}
+}
+
+// readDelimToken reads the next token and returns the delimiter string.
+// The delimiter may be a symbol token (e.g. "(", ")", "[", "]", ".", "|")
+// or a macro token (e.g. \{, \}, \langle, \rangle, \vert, \Vert, \|).
+func (p *parser) readDelimToken() string {
+	tok := p.next()
+	switch tok.Kind {
+	case token.Symbol, token.Lparen, token.Rparen,
+		token.Lbrack, token.Rbrack, token.Lbrace, token.Rbrace:
+		return tok.Text
+	case token.Macro:
+		return tok.Text
+	default:
+		// Unrecognised delimiter -- use invisible delimiter as fallback so
+		// the parser does not panic. The mtex layer can decide what to do.
+		return "."
+	}
 }

@@ -38,6 +38,22 @@ type Backend struct {
 	fonts  map[string]*sfnt.Font
 }
 
+// fontFallback maps unsupported font types to the closest available font.
+// LaTeX font commands like \mathcal, \mathbb, \mathfrak, etc. produce font
+// types that have no corresponding TTF font loaded. Rather than panicking,
+// we fall back to the nearest visual approximation.
+var fontFallback = map[string]string{
+	"cal":     "it", // calligraphic → italic
+	"scr":     "it", // script → italic
+	"bb":      "rm", // blackboard bold → roman
+	"frak":    "rm", // fraktur → roman
+	"sf":      "rm", // sans-serif → roman
+	"tt":      "rm", // typewriter → roman
+	"bfit":    "bf", // bold italic → bold
+	"default": "rm", // default → roman
+	"regular": "rm", // regular → roman
+}
+
 func New(cnv *drawtex.Canvas) *Backend {
 	return NewFrom(cnv, &defaultFonts)
 }
@@ -98,39 +114,48 @@ func (be *Backend) getInfo(symbol string, fnt font.Font, dpi float64, math bool)
 
 	postscript, err := ft.Name(&buf, sfnt.NameIDPostScript)
 	if err != nil {
-		panic(fmt.Errorf("could not retrieve postscript name of font: %+v", err))
+		panic(fmt.Errorf("could not retrieve postscript name of font (type=%s, symbol=%q): %+v",
+			fnt.Type, symbol, err))
 	}
 
+	// Try to find the glyph in the resolved font. If the glyph is missing,
+	// walk fallback fonts before giving up — characters like Greek letters
+	// may be absent from some font variants.
 	idx, err := ft.GlyphIndex(&buf, rn)
-	if err != nil {
-		panic(fmt.Errorf("could not retrieve glyph index for %q: %+v", rn, err))
+	if err != nil || idx == 0 {
+		ft, idx = be.resolveGlyph(&buf, ft, rn, fnt.Type)
 	}
 
 	symName, err := ft.GlyphName(&buf, idx)
 	if err != nil {
-		panic(fmt.Errorf("could not retrieve glyph name of %q: %+v", rn, err))
+		panic(fmt.Errorf("could not retrieve glyph name of %q (type=%s, symbol=%q): %+v",
+			rn, fnt.Type, symbol, err))
 	}
 
 	var ppem = int(ft.UnitsPerEm() * 6)
 	_, err = ft.LoadGlyph(&buf, idx, fixed.I(ppem), nil)
 	if err != nil {
-		panic(fmt.Errorf("could not load glyph %q: %+v", rn, err))
+		panic(fmt.Errorf("could not load glyph %q (type=%s, symbol=%q): %+v",
+			rn, fnt.Type, symbol, err))
 	}
 
 	adv, err := ft.GlyphAdvance(&buf, idx, fixed.I(ppem), hinting)
 	if err != nil {
-		panic(fmt.Errorf("could not retrieve glyph advance for %q: %+v", rn, err))
+		panic(fmt.Errorf("could not retrieve glyph advance for %q (type=%s, symbol=%q): %+v",
+			rn, fnt.Type, symbol, err))
 	}
 
 	fupe := fixed.Int26_6(ft.UnitsPerEm())
 	_, err = ft.LoadGlyph(&buf, idx, fupe, nil)
 	if err != nil {
-		panic(fmt.Errorf("could not load glyph %q: %+v", rn, err))
+		panic(fmt.Errorf("could not load glyph %q (type=%s, symbol=%q): %+v",
+			rn, fnt.Type, symbol, err))
 	}
 
 	bnds, _, err := ft.GlyphBounds(&buf, idx, fixed.I(12), hinting)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("could not retrieve glyph bounds for %q (type=%s, symbol=%q): %+v",
+			rn, fnt.Type, symbol, err))
 	}
 
 	var (
@@ -175,7 +200,7 @@ func (be *Backend) getInfo(symbol string, fnt font.Font, dpi float64, math bool)
 
 // XHeight returns the xheight for the given font and dpi.
 func (be *Backend) XHeight(fnt font.Font, dpi float64) float64 {
-	ft := be.getFont(fnt.Type)
+	ft := be.resolveFont(fnt.Type)
 	face, err := opentype.NewFace(ft, &opentype.FaceOptions{
 		DPI:     dpi,
 		Size:    fnt.Size,
@@ -210,10 +235,7 @@ func (be *Backend) getGlyph(symbol string, font font.Font, math bool) (*sfnt.Fon
 		}
 	}
 	slanted := (fontType == "it") || be.isSlanted(symbol)
-	ft := be.getFont(fontType)
-	if ft == nil {
-		panic("could not find TTF font for [" + fontType + "]")
-	}
+	ft := be.resolveFont(fontType)
 
 	// FIXME(sbinet):
 	// \sigma -> sigma, A->A, \infty->infinity, \nabla->gradient
@@ -233,6 +255,67 @@ func (*Backend) isSlanted(symbol string) bool {
 
 func (be *Backend) getFont(fontType string) *sfnt.Font {
 	return be.fonts[fontType]
+}
+
+// resolveFont returns the font for fontType, falling back through fontFallback
+// and then to "rm"/"default" if the requested type is not loaded.
+func (be *Backend) resolveFont(fontType string) *sfnt.Font {
+	ft := be.getFont(fontType)
+	if ft == nil {
+		if fb, ok := fontFallback[fontType]; ok {
+			ft = be.getFont(fb)
+		}
+	}
+	if ft == nil {
+		ft = be.getFont("rm")
+		if ft == nil {
+			ft = be.getFont("default")
+		}
+	}
+	if ft == nil {
+		panic("could not find any TTF font (tried [" + fontType + "] and all fallbacks)")
+	}
+	return ft
+}
+
+// resolveGlyph attempts to find a glyph for rune rn across fallback fonts.
+// It tries "rm", then "default", and finally falls back to the Unicode
+// replacement character (U+FFFD) or space. This prevents panics when the
+// primary font lacks a character (common for Greek letters, symbols, etc.).
+func (be *Backend) resolveGlyph(buf *sfnt.Buffer, primary *sfnt.Font, rn rune, fontType string) (*sfnt.Font, sfnt.GlyphIndex) {
+	// Try each fallback font for the original rune.
+	for _, name := range []string{"rm", "default"} {
+		candidate := be.getFont(name)
+		if candidate == nil || candidate == primary {
+			continue
+		}
+		idx, err := candidate.GlyphIndex(buf, rn)
+		if err == nil && idx != 0 {
+			return candidate, idx
+		}
+	}
+
+	// No font has the requested rune. Try replacement character, then space.
+	for _, fallbackRune := range []rune{'\uFFFD', ' '} {
+		for _, name := range []string{"rm", "default"} {
+			candidate := be.getFont(name)
+			if candidate == nil {
+				continue
+			}
+			idx, err := candidate.GlyphIndex(buf, fallbackRune)
+			if err == nil && idx != 0 {
+				return candidate, idx
+			}
+		}
+		// Also try the primary font for replacement characters.
+		idx, err := primary.GlyphIndex(buf, fallbackRune)
+		if err == nil && idx != 0 {
+			return primary, idx
+		}
+	}
+
+	panic(fmt.Errorf("could not resolve glyph for %q (U+%04X) in font type %q or any fallback",
+		rn, rn, fontType))
 }
 
 // UnderlineThickness returns the line thickness that matches the given font.
@@ -258,8 +341,8 @@ func (be *Backend) Kern(ft1 font.Font, sym1 string, ft2 font.Font, sym2 string, 
 			if errors.Is(err, sfnt.ErrNotFound) {
 				return 0
 			}
-			panic(fmt.Errorf("could not compute kerning for %q/%q: %+v",
-				sym1, sym2, err,
+			panic(fmt.Errorf("could not compute kerning for %q/%q (font=%s): %+v",
+				sym1, sym2, ft1.Type, err,
 			))
 		}
 		return float64(k) / 64

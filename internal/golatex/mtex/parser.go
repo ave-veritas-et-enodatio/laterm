@@ -143,10 +143,16 @@ func (p *parser) handler(name string) handler {
 	if symbols.IsSpaced(name) || symbols.PunctuationSymbols.Has(name) {
 		return handlerFunc(handleSymbol)
 	}
+	// Delimiters like (, ), [, ] etc. — render as plain characters.
+	// Must be checked before FunctionNames which assumes a leading `\`.
+	if symbols.LeftDelim.Has(name) || symbols.RightDelim.Has(name) {
+		return handlerFunc(handleSymbol)
+	}
 	if name == `\hspace` {
 		return handlerFunc(handleCustomSpace)
 	}
-	if symbols.FunctionNames.Has(name[1:]) { // drop leading `\`
+	// FunctionNames check requires at least 2 chars (leading `\` + name).
+	if len(name) > 1 && symbols.FunctionNames.Has(name[1:]) {
 		return handlerFunc(handleFunction)
 	}
 	switch name {
@@ -165,8 +171,14 @@ func (p *parser) handler(name string) handler {
 	case `\overline`:
 		return handlerFunc(handleOverline)
 	}
-	_, ok := p.macros[name]
+	h, ok := p.macros[name]
 	if ok {
+		// Macros with non-empty signatures (e.g. \mathbf "A", \stackrel "AA")
+		// must use their own Handle method which processes arguments.
+		// handleSymbol ignores arguments and would render only the macro name.
+		if bm, isBM := h.(builtinMacro); isBM && string(bm) != "" {
+			return h
+		}
 		return handlerFunc(handleSymbol)
 	}
 	return nil
@@ -233,8 +245,13 @@ func handleSymbol(p *parser, node ast.Node, state tex.State, math bool) tex.Node
 				ch,
 				p.makeSpace(state, 0.2),
 			}, true)
+		default:
+			// Other punctuation (comma, semicolon, etc.) — add trailing space.
+			return tex.HListOf([]tex.Node{
+				ch,
+				p.makeSpace(state, 0.2),
+			}, true)
 		}
-		panic("not implemented")
 	}
 	return ch
 }
