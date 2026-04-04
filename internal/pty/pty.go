@@ -168,7 +168,9 @@ func (s *Session) ForwardSignals(onResize func()) func() {
 
 	var wg sync.WaitGroup
 
-	// Forward SIGINT/SIGTERM to the child.
+	// Forward SIGINT/SIGTERM to the child. If the child has exited
+	// (Signal returns an error), stop forwarding and restore default
+	// signal handling so the user can Ctrl+C the parent.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -177,10 +179,13 @@ func (s *Session) ForwardSignals(onResize func()) func() {
 				continue
 			}
 			if err := s.cmd.Process.Signal(sig); err != nil {
-				s.logger.Debug("pty: forward signal failed",
+				s.logger.Debug("pty: forward signal failed, child likely exited",
 					slog.String("signal", sig.String()),
 					slog.String("err", err.Error()),
 				)
+				// Child is gone — restore default handler so signals
+				// reach the parent process directly.
+				signal.Reset(sig.(syscall.Signal))
 			}
 		}
 	}()

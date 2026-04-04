@@ -39,7 +39,7 @@ type Config struct {
 	Renderer  render.Renderer
 	Logger    *slog.Logger
 
-	MaxWidth        int           // terminal width in columns for rendering
+	MaxWidth        int           // terminal width in pixels for rendering
 	InlineTimeout   time.Duration // time budget for inline math (default 200ms)
 	BlockTimeout    time.Duration // time budget for block math (default 10s)
 	InlineRenderTimeout time.Duration // wall-clock timeout for inline rendering (default 2s)
@@ -343,8 +343,10 @@ func (l *Loop) finishRender(rendered []byte, content string, isBlock bool) {
 	defer l.mu.Unlock()
 
 	if l.overflow {
-		// Post buffer overflowed during render — the raw text was already
-		// flushed to the terminal. Discard the render result.
+		// Post buffer overflowed during render — discard the render result
+		// but write the raw expression so the LaTeX source is not silently lost.
+		raw := rawExpression(content, isBlock)
+		l.writeLocked(raw)
 		l.rendering = false
 		return
 	}
@@ -460,13 +462,15 @@ func (l *Loop) drainTimeBudget() {
 func (l *Loop) shutdown() {
 	l.cancelTimeBudget()
 
-	// If the machine is mid-math, flush as literal.
+	// Wait for any in-flight render to complete first, so we don't race
+	// between this flush and finishRender's write.
+	l.waitForRender()
+
+	// If the machine is mid-math, flush as literal. Safe to call after
+	// waitForRender because no render goroutine is in flight.
 	action := l.cfg.Machine.TimeBudgetExpired()
 	if action.Kind != statemachine.ActionNone {
 		l.inMath = false
 		l.writeOrBuffer(action.Data)
 	}
-
-	// Wait for any in-flight render to complete.
-	l.waitForRender()
 }

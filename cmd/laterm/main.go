@@ -18,6 +18,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/term"
+
 	"github.com/benn-herrera/laterm/internal/logging"
 	"github.com/benn-herrera/laterm/internal/pty"
 	"github.com/benn-herrera/laterm/internal/render"
@@ -40,10 +42,14 @@ Environment variables:
 `
 
 func main() {
+	os.Exit(run())
+}
+
+func run() (exitCode int) {
 	// 1. Parse args.
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
-		os.Exit(1)
+		return 1
 	}
 	command := os.Args[1:]
 
@@ -51,12 +57,28 @@ func main() {
 	logger, cleanup, err := logging.Init()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "laterm: init logging: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer cleanup()
 	logger.Info("laterm starting", slog.String("command", command[0]))
 
-	// 3. Probe terminal capabilities.
+	// 3. Save original terminal state before anything touches the terminal.
+	//    This is the ground-truth state for restoration, independent of what
+	//    termcap.Probe or pty.Start do with raw mode.
+	stdinFd := int(os.Stdin.Fd())
+	if term.IsTerminal(stdinFd) {
+		origState, err := term.GetState(stdinFd)
+		if err == nil {
+			defer func() {
+				if restoreErr := term.Restore(stdinFd, origState); restoreErr != nil {
+					logger.Warn("laterm: final terminal restore failed",
+						slog.String("error", restoreErr.Error()))
+				}
+			}()
+		}
+	}
+
+	// 4. Probe terminal capabilities.
 	caps, err := termcap.Probe(os.Stdin.Fd(), os.Stdin, os.Stdout)
 	if err != nil {
 		logger.Warn("laterm: termcap probe failed, continuing with defaults",
@@ -71,7 +93,7 @@ func main() {
 		HeightPixels:   caps.HeightPixels,
 	}
 
-	// 4. Create renderers and select based on capabilities.
+	// 5. Create renderers and select based on capabilities.
 	unicodeRenderer := unicode.New()
 	sixelRenderer := sixel.New(sixel.Config{
 		MaxPixelWidth:  caps.WidthPixels,
@@ -80,7 +102,7 @@ func main() {
 	})
 	renderer := render.Select(renderCaps, sixelRenderer, unicodeRenderer)
 
-	// 5. Start PTY session.
+	// 6. Start PTY session.
 	session, err := pty.Start(pty.Config{
 		Command: command,
 		Logger:  logger,
@@ -88,22 +110,23 @@ func main() {
 	if err != nil {
 		logger.Error("laterm: start pty", slog.String("error", err.Error()))
 		fmt.Fprintf(os.Stderr, "laterm: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer session.Close()
 
-	// 6. Panic recovery. Registered after session.Close so it runs before
+	// 7. Panic recovery. Registered after session.Close so it runs before
 	//    Close (LIFO order). RestoreTerminal is idempotent, so calling it
 	//    here ensures the terminal is restored even if Close hasn't run yet.
+	//    Uses named return to set exit code from recovered panic.
 	defer func() {
 		if r := recover(); r != nil {
 			session.RestoreTerminal()
 			logger.Error("laterm: panic", slog.Any("panic", r))
-			os.Exit(1)
+			exitCode = 1
 		}
 	}()
 
-	// 7. Signal handling.
+	// 8. Signal handling.
 	//    ForwardSignals handles SIGINT/SIGTERM forwarding to child and
 	//    SIGWINCH resize. We capture the onResize callback below once the
 	//    stream loop exists.
@@ -129,7 +152,7 @@ func main() {
 		syscall.Kill(syscall.Getpid(), sig.(syscall.Signal))
 	}()
 
-	// 8. Copy stdin to child PTY.
+	// 9. Copy stdin to child PTY.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -140,7 +163,7 @@ func main() {
 		_, _ = io.Copy(session.Writer(), os.Stdin)
 	}()
 
-	// 9. Create and run the stream loop.
+	// 10. Create and run the stream loop.
 	machine := statemachine.New(statemachine.Config{})
 	san := sanitize.New(sanitize.Config{})
 	loop, err := stream.NewLoop(stream.Config{
@@ -155,7 +178,7 @@ func main() {
 	if err != nil {
 		session.RestoreTerminal()
 		logger.Error("laterm: create stream loop", slog.String("error", err.Error()))
-		os.Exit(1)
+		return 1
 	}
 
 	// Now wire up signal forwarding with the resize callback.
@@ -176,7 +199,6 @@ func main() {
 		logger.Debug("laterm: stream loop ended", slog.String("error", err.Error()))
 	}
 
-	// 10. Wait for child and exit with its code.
-	exitCode := session.Wait()
-	os.Exit(exitCode)
+	// 11. Wait for child and exit with its code.
+	return session.Wait()
 }
