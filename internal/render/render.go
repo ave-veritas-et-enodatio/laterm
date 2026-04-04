@@ -34,16 +34,36 @@ type Capabilities struct {
 	HeightPixels   int
 }
 
+// SafeRenderer wraps a Renderer with panic recovery so that a panicking
+// renderer returns an error instead of crashing the process.
+type SafeRenderer struct {
+	Inner  Renderer
+	Logger *slog.Logger
+}
+
+func (s *SafeRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) (data []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("renderer panic: %v", r)
+			if s.Logger != nil {
+				s.Logger.Error("renderer panic recovered", "error", r)
+			}
+		}
+	}()
+	return s.Inner.Render(ctx, expr, mathType, maxWidth)
+}
+
 // FallbackRenderer tries a primary renderer; on error, it falls back to a
 // secondary renderer. This lets the system try Sixel first and fall back to
-// Unicode when Sixel fails.
+// Unicode when Sixel fails. The secondary is wrapped in a SafeRenderer so
+// panics in the fallback path are recovered.
 type FallbackRenderer struct {
 	Primary   Renderer
 	Secondary Renderer
 	Logger    *slog.Logger
 }
 
-func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) (data []byte, err error) {
+func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) ([]byte, error) {
 	result, primaryErr := f.Primary.Render(ctx, expr, mathType, maxWidth)
 	if primaryErr == nil && len(result) > 0 {
 		return result, nil
@@ -56,12 +76,8 @@ func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType Mat
 			f.Logger.Debug("primary renderer returned empty, trying fallback")
 		}
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("fallback renderer panic: %v", r)
-		}
-	}()
-	return f.Secondary.Render(ctx, expr, mathType, maxWidth)
+	safe := &SafeRenderer{Inner: f.Secondary, Logger: f.Logger}
+	return safe.Render(ctx, expr, mathType, maxWidth)
 }
 
 // Select returns the appropriate renderer based on terminal capabilities.
@@ -76,5 +92,5 @@ func Select(caps Capabilities, sixelRenderer, unicodeRenderer Renderer, logger *
 			Logger:    logger,
 		}
 	}
-	return unicodeRenderer
+	return &SafeRenderer{Inner: unicodeRenderer, Logger: logger}
 }

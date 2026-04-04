@@ -350,7 +350,10 @@ func handleCustomSpace(p *parser, node ast.Node, state tex.State, math bool) tex
 }
 
 func handleFunction(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
-	macro := node.(*ast.Macro)
+	macro, ok := node.(*ast.Macro)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 	state.Font.Type = "rm"
 	fun := macro.Name.Name[1:] // drop leading `\`
 	nodes := make([]tex.Node, 0, len(fun))
@@ -361,11 +364,22 @@ func handleFunction(p *parser, node ast.Node, state tex.State, math bool) tex.No
 }
 
 func handleFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 2 {
+		return tex.NewChar("?", state, math)
+	}
+	numArg, ok := macro.Args[0].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	denArg, ok := macro.Args[1].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 	var (
-		macro     = node.(*ast.Macro)
 		thickness = state.Backend().UnderlineThickness(state.Font, state.DPI)
-		numNode   = ast.List(macro.Args[0].(*ast.Arg).List)
-		denNode   = ast.List(macro.Args[1].(*ast.Arg).List)
+		numNode   = ast.List(numArg.List)
+		denNode   = ast.List(denArg.List)
 	)
 
 	num := p.handleNode(numNode, state, math)
@@ -380,11 +394,22 @@ func handleFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
 }
 
 func handleDFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 2 {
+		return tex.NewChar("?", state, math)
+	}
+	numArg, ok := macro.Args[0].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	denArg, ok := macro.Args[1].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 	var (
-		macro     = node.(*ast.Macro)
 		thickness = state.Backend().UnderlineThickness(state.Font, state.DPI)
-		numNode   = ast.List(macro.Args[0].(*ast.Arg).List)
-		denNode   = ast.List(macro.Args[1].(*ast.Arg).List)
+		numNode   = ast.List(numArg.List)
+		denNode   = ast.List(denArg.List)
 	)
 
 	num := p.handleNode(numNode, state, math)
@@ -394,11 +419,22 @@ func handleDFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node 
 }
 
 func handleTFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 2 {
+		return tex.NewChar("?", state, math)
+	}
+	numArg, ok := macro.Args[0].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	denArg, ok := macro.Args[1].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 	var (
-		macro     = node.(*ast.Macro)
 		thickness = state.Backend().UnderlineThickness(state.Font, state.DPI)
-		numNode   = ast.List(macro.Args[0].(*ast.Arg).List)
-		denNode   = ast.List(macro.Args[1].(*ast.Arg).List)
+		numNode   = ast.List(numArg.List)
+		denNode   = ast.List(denArg.List)
 	)
 
 	num := p.handleNode(numNode, state, math)
@@ -408,10 +444,21 @@ func handleTFrac(p *parser, node ast.Node, state tex.State, math bool) tex.Node 
 }
 
 func handleBinom(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 2 {
+		return tex.NewChar("?", state, math)
+	}
+	numArg, ok := macro.Args[0].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	denArg, ok := macro.Args[1].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 	var (
-		macro   = node.(*ast.Macro)
-		numNode = ast.List(macro.Args[0].(*ast.Arg).List)
-		denNode = ast.List(macro.Args[1].(*ast.Arg).List)
+		numNode = ast.List(numArg.List)
+		denNode = ast.List(denArg.List)
 	)
 
 	num := p.handleNode(numNode, state, math)
@@ -466,29 +513,42 @@ func (p *parser) genfrac(ldelim, rdelim string, rule float64, style mathStyleKin
 }
 
 func handleSqrt(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 1 {
+		return tex.NewChar("\u221a", state, math)
+	}
 	var (
-		macro = node.(*ast.Macro)
-		root  tex.Node
-		body  *tex.HList
+		root tex.Node
+		body *tex.HList
 	)
 	switch len(macro.Args) {
 	case 2:
-		root = p.handleNode(
-			ast.List(macro.Args[0].(*ast.OptArg).List),
-			state, math,
-		)
-		body = p.handleNode(
-			ast.List(macro.Args[1].(*ast.Arg).List),
-			state, math,
-		).(*tex.HList)
+		optArg, ok := macro.Args[0].(*ast.OptArg)
+		if !ok {
+			return tex.NewChar("\u221a", state, math)
+		}
+		bodyArg, ok := macro.Args[1].(*ast.Arg)
+		if !ok {
+			return tex.NewChar("\u221a", state, math)
+		}
+		root = p.handleNode(ast.List(optArg.List), state, math)
+		bodyNode := p.handleNode(ast.List(bodyArg.List), state, math)
+		body, ok = bodyNode.(*tex.HList)
+		if !ok {
+			return tex.NewChar("\u221a", state, math)
+		}
 	case 1:
-		// ok
-		body = p.handleNode(
-			ast.List(macro.Args[0].(*ast.Arg).List),
-			state, math,
-		).(*tex.HList)
+		bodyArg, ok := macro.Args[0].(*ast.Arg)
+		if !ok {
+			return tex.NewChar("\u221a", state, math)
+		}
+		bodyNode := p.handleNode(ast.List(bodyArg.List), state, math)
+		body, ok = bodyNode.(*tex.HList)
+		if !ok {
+			return tex.NewChar("\u221a", state, math)
+		}
 	default:
-		panic("invalid sqrt")
+		return tex.NewChar("\u221a", state, math)
 	}
 
 	thickness := state.Backend().UnderlineThickness(state.Font, state.DPI)
@@ -545,11 +605,19 @@ func handleSqrt(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
 }
 
 func handleOverline(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
-	macro := node.(*ast.Macro)
-	body := p.handleNode(
-		ast.List(macro.Args[0].(*ast.Arg).List),
-		state, math,
-	).(*tex.HList)
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) < 1 {
+		return tex.NewChar("?", state, math)
+	}
+	arg, ok := macro.Args[0].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	bodyNode := p.handleNode(ast.List(arg.List), state, math)
+	body, ok := bodyNode.(*tex.HList)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
 
 	thickness := state.Backend().UnderlineThickness(state.Font, state.DPI)
 
@@ -585,10 +653,28 @@ func handleLeftRight(p *parser, node ast.Node, state tex.State, math bool) tex.N
 	}
 
 	// Args[0] = left delim, Args[1] = content, Args[2] = right delim.
-	ldelim := macro.Args[0].(*ast.Arg).List[0].(*ast.Symbol).Text
-	content := p.handleNode(ast.List(macro.Args[1].(*ast.Arg).List), state, math)
-	rdelim := macro.Args[2].(*ast.Arg).List[0].(*ast.Symbol).Text
-	return p.autoSizedDelimiter(ldelim, []tex.Node{content}, rdelim, state)
+	larg, ok := macro.Args[0].(*ast.Arg)
+	if !ok || len(larg.List) == 0 {
+		return tex.NewChar("?", state, math)
+	}
+	lsym, ok := larg.List[0].(*ast.Symbol)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	carg, ok := macro.Args[1].(*ast.Arg)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	rarg, ok := macro.Args[2].(*ast.Arg)
+	if !ok || len(rarg.List) == 0 {
+		return tex.NewChar("?", state, math)
+	}
+	rsym, ok := rarg.List[0].(*ast.Symbol)
+	if !ok {
+		return tex.NewChar("?", state, math)
+	}
+	content := p.handleNode(ast.List(carg.List), state, math)
+	return p.autoSizedDelimiter(lsym.Text, []tex.Node{content}, rsym.Text, state)
 }
 
 func (p *parser) makeSpace(state tex.State, percentage float64) *tex.Kern {

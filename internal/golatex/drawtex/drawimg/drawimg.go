@@ -29,12 +29,23 @@ func NewRenderer(w io.Writer) *Renderer {
 	return &Renderer{w: w}
 }
 
+// maxPixelDim is the largest width or height (in pixels) we allow for a
+// rendered bitmap.  4096 px at 4 bytes/pixel ≈ 64 MB worst-case, which is
+// large but bounded.  Anything beyond this is almost certainly a degenerate
+// box-model output (e.g. \hspace{999}).
+const maxPixelDim = 4096
+
 func (r *Renderer) Render(width, height, dpi float64, c *drawtex.Canvas) error {
 	var (
-		w   = width * dpi
-		h   = height * dpi
-		ctx = gg.NewContext(int(math.Ceil(w)), int(math.Ceil(h)))
+		w = int(math.Ceil(width * dpi))
+		h = int(math.Ceil(height * dpi))
 	)
+
+	if w > maxPixelDim || h > maxPixelDim {
+		return fmt.Errorf("rendered image too large: %dx%d exceeds %d pixel limit", w, h, maxPixelDim)
+	}
+
+	ctx := gg.NewContext(w, h)
 	// log.Printf("write: w=%g, h=%g", w, h)
 
 	if false {
