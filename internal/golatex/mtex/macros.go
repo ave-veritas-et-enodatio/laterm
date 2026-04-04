@@ -328,6 +328,40 @@ var (
 		`\vdots`:  builtinMacro(""),
 		`\hspace`: builtinMacro("A"),
 
+		// text and font commands
+		`\text`:       builtinMacro("A"),
+		`\mathrm`:     builtinMacro("A"),
+		`\boldsymbol`: builtinMacro("A"),
+
+		// invisible box
+		`\phantom`: builtinMacro("A"),
+
+		// style switches (no args)
+		`\displaystyle`: builtinMacro(""),
+		`\textstyle`:    builtinMacro(""),
+
+		// over/under braces
+		`\underbrace`: builtinMacro("A"),
+		`\overbrace`:  builtinMacro("A"),
+
+		// negation modifier
+		`\not`: builtinMacro("A"),
+
+		// color (consume the arg, ignore color)
+		`\color`: builtinMacro("A"),
+
+		// accent commands
+		`\hat`:   builtinMacro("A"),
+		`\tilde`: builtinMacro("A"),
+		`\vec`:   builtinMacro("A"),
+		`\bar`:   builtinMacro("A"),
+		`\dot`:   builtinMacro("A"),
+		`\ddot`:  builtinMacro("A"),
+		`\breve`: builtinMacro("A"),
+		`\acute`: builtinMacro("A"),
+		`\grave`: builtinMacro("A"),
+		`\check`: builtinMacro("A"),
+
 		// catch-all
 		//
 		`\overline`:     builtinMacro("A"),
@@ -387,17 +421,27 @@ func handleBuiltinArg(p *parser, node *ast.Macro, name string, argIndex int, sta
 	}
 
 	switch {
-	// Math font commands: \mathcal, \mathbb, \mathbf, etc.
+	// Math font commands: \mathcal, \mathbb, \mathbf, \mathrm, etc.
 	case strings.HasPrefix(name, `\math`):
 		fontType := name[5:] // strip `\math` prefix
 		state.Font.Type = fontType
 		return p.handleNode(ast.List(arg.List), state, math)
+
+	// \text{...}: render in roman font, non-math mode.
+	case name == `\text`:
+		state.Font.Type = "rm"
+		return p.handleNode(ast.List(arg.List), state, false)
 
 	// Text font commands: \textbf, \textit, etc.
 	case strings.HasPrefix(name, `\text`):
 		fontType := name[5:] // strip `\text` prefix
 		state.Font.Type = fontType
 		return p.handleNode(ast.List(arg.List), state, false)
+
+	// \boldsymbol{...}: render in bold font.
+	case name == `\boldsymbol`:
+		state.Font.Type = "bf"
+		return p.handleNode(ast.List(arg.List), state, math)
 
 	// \operatorname{...}: render argument content in roman font,
 	// one character at a time, like handleFunction.
@@ -408,6 +452,33 @@ func handleBuiltinArg(p *parser, node *ast.Macro, name string, argIndex int, sta
 			nodes = append(nodes, p.handleNode(child, state, math))
 		}
 		return tex.HListOf(nodes, true)
+
+	// \phantom{...}: render content (true phantom is invisible, but visible
+	// is better than panicking).
+	case name == `\phantom`:
+		return p.handleNode(ast.List(arg.List), state, math)
+
+	// \underbrace{...}, \overbrace{...}: render the content without the brace
+	// decoration. Brace layout is complex; just render the body.
+	case name == `\underbrace`, name == `\overbrace`:
+		return p.handleNode(ast.List(arg.List), state, math)
+
+	// \not{...}: negation modifier. Render the argument as-is; the
+	// combining solidus overlay is cosmetic.
+	case name == `\not`:
+		return p.handleNode(ast.List(arg.List), state, math)
+
+	// \color{...}: ignore color specification, render arg content.
+	case name == `\color`:
+		return p.handleNode(ast.List(arg.List), state, math)
+
+	// Accent commands: \hat, \vec, \bar, \dot, etc. Render the argument
+	// content without the accent decoration for now. Better than panicking.
+	case name == `\hat`, name == `\tilde`, name == `\vec`,
+		name == `\bar`, name == `\dot`, name == `\ddot`,
+		name == `\breve`, name == `\acute`, name == `\grave`,
+		name == `\check`:
+		return p.handleNode(ast.List(arg.List), state, math)
 
 	default:
 		// Unknown single-arg macro — process the argument with current state.

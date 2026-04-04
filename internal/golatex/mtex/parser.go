@@ -121,6 +121,26 @@ func (v *visitor) Visit(n ast.Node) ast.Visitor {
 		v.nodes = append(v.nodes, h.Handle(v.p, n, v.state, v.math))
 		return nil
 
+	case *ast.Sup:
+		// Superscript: shrink content and shift up.
+		content := v.p.handleNode(n.Node, v.state, v.math)
+		content.Shrink()
+		xh := v.state.Backend().XHeight(v.state.Font, v.state.DPI)
+		vl := tex.VListOf([]tex.Node{content})
+		vl.SetShift(-xh * 0.5)
+		v.nodes = append(v.nodes, vl)
+		return nil
+
+	case *ast.Sub:
+		// Subscript: shrink content and shift down.
+		content := v.p.handleNode(n.Node, v.state, v.math)
+		content.Shrink()
+		xh := v.state.Backend().XHeight(v.state.Font, v.state.DPI)
+		vl := tex.VListOf([]tex.Node{content})
+		vl.SetShift(xh * 0.3)
+		v.nodes = append(v.nodes, vl)
+		return nil
+
 	case nil:
 		return v
 
@@ -170,6 +190,10 @@ func (p *parser) handler(name string) handler {
 		return handlerFunc(handleSqrt)
 	case `\overline`:
 		return handlerFunc(handleOverline)
+	case `\left`:
+		return handlerFunc(handleLeftRight)
+	case `\displaystyle`, `\textstyle`:
+		return handlerFunc(handleStyleSwitch)
 	}
 	h, ok := p.macros[name]
 	if ok {
@@ -522,6 +546,26 @@ func handleOverline(p *parser, node ast.Node, state tex.State, math bool) tex.No
 
 	hl := tex.HListOf([]tex.Node{rhs}, true)
 	return hl
+}
+
+func handleStyleSwitch(_ *parser, _ ast.Node, _ tex.State, _ bool) tex.Node {
+	// \displaystyle, \textstyle: style switches that affect layout sizing.
+	// For now, return an empty kern (no-op) rather than panicking.
+	return tex.NewKern(0)
+}
+
+func handleLeftRight(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
+	macro := node.(*ast.Macro)
+	if len(macro.Args) < 3 {
+		// Malformed \left — degrade to plain text.
+		return tex.NewChar(macro.Name.Name, state, math)
+	}
+
+	// Args[0] = left delim, Args[1] = content, Args[2] = right delim.
+	ldelim := macro.Args[0].(*ast.Arg).List[0].(*ast.Symbol).Text
+	content := p.handleNode(ast.List(macro.Args[1].(*ast.Arg).List), state, math)
+	rdelim := macro.Args[2].(*ast.Arg).List[0].(*ast.Symbol).Text
+	return p.autoSizedDelimiter(ldelim, []tex.Node{content}, rdelim, state)
 }
 
 func (p *parser) makeSpace(state tex.State, percentage float64) *tex.Kern {
