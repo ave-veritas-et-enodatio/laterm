@@ -15,7 +15,8 @@ const (
 type Renderer interface {
 	// Render converts a LaTeX expression to terminal output bytes.
 	// ctx carries a deadline for the render operation.
-	// maxWidth is the maximum output width in terminal columns.
+	// maxWidth is the maximum output width in pixels (for Sixel rendering).
+	// Renderers that don't use pixel dimensions may ignore this value.
 	// Returns the rendered bytes or an error (caller falls back on error).
 	Render(ctx context.Context, expr string, mathType MathType, maxWidth int) ([]byte, error)
 }

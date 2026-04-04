@@ -182,7 +182,7 @@ laterm/
   nesting depth budget. Reject expressions containing any command not on the
   allowlist. Rejection means the entire expression is refused (not
   partially sanitized).
-- Imports: stdlib only. Specifically: `strings`, `unicode`, `logging`.
+- Imports: stdlib only. Specifically: `fmt`, `strings`.
 - Must NOT import: `go-latex`, `render`, `statemachine`, `pty`, `stream`.
 - The allowlist is a static data structure (map or set) defined in this
   package. It contains ~80-120 entries covering: Greek letters, operators,
@@ -207,8 +207,10 @@ laterm/
 - Responsibility: Convert LaTeX expressions to Unicode approximations using
   lookup tables. Greek letters, common operators, simple super/subscripts.
   Unknown macros pass through as raw LaTeX.
-- Imports: stdlib only.
-- Must NOT import: `go-latex`, `go-sixel`, `sixel/`, `render/` (parent).
+- Imports: stdlib plus parent `render` package (for `Renderer` interface and
+  `MathType`). This is standard Go — child importing parent creates no cycle
+  since the parent does not import the child.
+- Must NOT import: `go-latex`, `go-sixel`, `render/sixel`.
 
 **`internal/render/sixel/`**
 - Responsibility: Parse LaTeX via `go-latex`, render to `image.RGBA`, encode
@@ -284,6 +286,7 @@ are confined to `render/sixel/`. The PTY dependency is confined to
 | `golang.org/x/term` | `internal/pty`, `internal/termcap` | Terminal raw mode, state save/restore, size queries. Extended stdlib maintained by Go team. |
 | `codeberg.org/go-latex/latex` | `internal/render/sixel` | LaTeX parsing and rendering to image. Only known pure-Go LaTeX renderer. Confined behind sanitizer and timeout. |
 | `github.com/mattn/go-sixel` | `internal/render/sixel` | Sixel encoding from `image.Image`. Non-trivial protocol implementation. Confined behind panic recovery. |
+| `golang.org/x/sys/unix` | `internal/termcap` | TIOCGWINSZ ioctl for terminal pixel dimensions. Extended stdlib maintained by Go team. Required because `golang.org/x/term` does not expose pixel dimensions. |
 
 No other external dependencies are permitted without updating this table and
 providing justification.
