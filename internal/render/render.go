@@ -1,6 +1,9 @@
 package render
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // MathType indicates whether the expression is inline ($...$) or block ($$...$$).
 type MathType int
@@ -30,12 +33,42 @@ type Capabilities struct {
 	HeightPixels   int
 }
 
+// FallbackRenderer tries a primary renderer; on error, it falls back to a
+// secondary renderer. This lets the system try Sixel first and fall back to
+// Unicode when Sixel fails.
+type FallbackRenderer struct {
+	Primary   Renderer
+	Secondary Renderer
+	Logger    *slog.Logger
+}
+
+func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) ([]byte, error) {
+	result, err := f.Primary.Render(ctx, expr, mathType, maxWidth)
+	if err == nil && len(result) > 0 {
+		return result, nil
+	}
+	if f.Logger != nil {
+		if err != nil {
+			f.Logger.Debug("primary renderer failed, trying fallback",
+				slog.String("error", err.Error()))
+		} else {
+			f.Logger.Debug("primary renderer returned empty, trying fallback")
+		}
+	}
+	return f.Secondary.Render(ctx, expr, mathType, maxWidth)
+}
+
 // Select returns the appropriate renderer based on terminal capabilities.
-// If Sixel is supported and sixelRenderer is non-nil, returns it.
-// Otherwise returns the unicodeRenderer.
-func Select(caps Capabilities, sixelRenderer, unicodeRenderer Renderer) Renderer {
+// If Sixel is supported and sixelRenderer is non-nil, returns a
+// FallbackRenderer that tries Sixel first and falls back to Unicode.
+// Otherwise returns the unicodeRenderer directly.
+func Select(caps Capabilities, sixelRenderer, unicodeRenderer Renderer, logger *slog.Logger) Renderer {
 	if caps.SixelSupported && sixelRenderer != nil {
-		return sixelRenderer
+		return &FallbackRenderer{
+			Primary:   sixelRenderer,
+			Secondary: unicodeRenderer,
+			Logger:    logger,
+		}
 	}
 	return unicodeRenderer
 }

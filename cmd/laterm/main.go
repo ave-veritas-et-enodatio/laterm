@@ -100,7 +100,7 @@ func run() (exitCode int) {
 		MaxPixelHeight: caps.HeightPixels,
 		Logger:         logger,
 	})
-	renderer := render.Select(renderCaps, sixelRenderer, unicodeRenderer)
+	renderer := render.Select(renderCaps, sixelRenderer, unicodeRenderer, logger)
 
 	// 6. Start PTY session.
 	session, err := pty.Start(pty.Config{
