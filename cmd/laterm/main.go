@@ -48,11 +48,12 @@ func main() {
 	command := os.Args[1:]
 
 	// 2. Initialize logging.
-	logger, err := logging.Init()
+	logger, cleanup, err := logging.Init()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "laterm: init logging: %v\n", err)
 		os.Exit(1)
 	}
+	defer cleanup()
 	logger.Info("laterm starting", slog.String("command", command[0]))
 
 	// 3. Probe terminal capabilities.

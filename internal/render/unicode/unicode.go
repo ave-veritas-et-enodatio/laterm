@@ -5,8 +5,8 @@
 // unchanged. This is a best-effort renderer — perfect LaTeX fidelity in
 // Unicode is not possible.
 //
-// This package is stdlib-only and must not import go-latex, go-sixel,
-// or the parent render package.
+// This package imports the parent render package for the Renderer
+// interface and MathType, but must not import go-latex or go-sixel.
 package unicode
 
 import (

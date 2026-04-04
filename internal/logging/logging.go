@@ -61,7 +61,11 @@ func WithStderr() Option {
 	}
 }
 
-// Init creates and returns a configured slog.Logger.
+// Init creates and returns a configured slog.Logger and a cleanup function.
+//
+// The cleanup function closes any log file handles opened during Init.
+// Callers must invoke cleanup when the logger is no longer needed (typically
+// via defer). When no file is opened, cleanup is a no-op.
 //
 // With no options, Init reads defaults from environment variables:
 //   - LATERM_LOG_LEVEL: "debug", "info", "warn", or "error" (case-insensitive). Default: "info".
@@ -69,7 +73,9 @@ func WithStderr() Option {
 //
 // Options override environment variable defaults.
 // The returned logger is also set as the package default (accessible via Default).
-func Init(opts ...Option) (*slog.Logger, error) {
+func Init(opts ...Option) (*slog.Logger, func(), error) {
+	noop := func() {}
+
 	cfg := config{
 		level:    envLevel(),
 		filePath: os.Getenv("LATERM_LOG_FILE"),
@@ -80,13 +86,13 @@ func Init(opts ...Option) (*slog.Logger, error) {
 
 	writers, cleanup, err := buildWriters(cfg)
 	if err != nil {
-		return nil, err
+		return nil, noop, err
 	}
 
 	if len(writers) == 0 {
 		logger := slog.New(discardHandler{})
 		defaultLogger.Store(logger)
-		return logger, nil
+		return logger, cleanup, nil
 	}
 
 	var w io.Writer
@@ -105,7 +111,7 @@ func Init(opts ...Option) (*slog.Logger, error) {
 		cleanup: cleanup,
 	})
 	defaultLogger.Store(logger)
-	return logger, nil
+	return logger, cleanup, nil
 }
 
 // envLevel parses LATERM_LOG_LEVEL into an slog.Level.

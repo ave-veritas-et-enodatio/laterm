@@ -247,7 +247,15 @@ func (m *Machine) feedEscapeSeq(b byte) Action {
 // happen.
 func (m *Machine) feedPotentialMath(b byte) Action {
 	switch {
-	// Shell variable: $A-$Z (uppercase letter)
+	// Shell variable: $A-$Z (uppercase letter).
+	//
+	// Lowercase after $ is ambiguous between shell variables ($var) and
+	// single-letter math variables ($x$, $n$). We reject only uppercase
+	// because: (1) uppercase shell vars ($PATH, $HOME) are the dominant
+	// false positive source, and (2) single-letter lowercase math like
+	// $x$ is the primary LaTeX use case. Lowercase shell variables ($path
+	// in zsh) will be caught by the time budget (200ms) and flushed as
+	// literal.
 	case b >= 'A' && b <= 'Z':
 		return m.rejectAsShellVar(b)
 

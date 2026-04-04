@@ -54,10 +54,11 @@ func TestInitDefaults(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	logger, err := Init()
+	logger, cleanup, err := Init()
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 	if logger == nil {
 		t.Fatal("Init() returned nil logger")
 	}
@@ -84,10 +85,11 @@ func TestDefaultBeforeAndAfterInit(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	logger, err := Init(WithFile(logFile))
+	logger, cleanup, err := Init(WithFile(logFile))
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	post := Default()
 	if post == nil {
@@ -122,10 +124,11 @@ func TestWithLevel(t *testing.T) {
 			t.Setenv("LATERM_LOG_LEVEL", "")
 			t.Setenv("LATERM_LOG_FILE", "")
 
-			logger, err := Init(WithLevel(tc.level), WithFile(logFile))
+			logger, cleanup, err := Init(WithLevel(tc.level), WithFile(logFile))
 			if err != nil {
 				t.Fatalf("Init() error: %v", err)
 			}
+			defer cleanup()
 
 			got := logger.Enabled(nil, tc.checkAt)
 			if got != tc.enabled {
@@ -141,10 +144,11 @@ func TestWithFile(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	logger, err := Init(WithFile(logFile), WithLevel(slog.LevelInfo))
+	logger, cleanup, err := Init(WithFile(logFile), WithLevel(slog.LevelInfo))
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	logger.Info("hello from test", "k", "v")
 
@@ -171,7 +175,8 @@ func TestWithFileInvalidPath(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	_, err := Init(WithFile("/no/such/directory/test.log"))
+	_, cleanup, err := Init(WithFile("/no/such/directory/test.log"))
+	defer cleanup()
 	if err == nil {
 		t.Fatal("Init() with invalid file path should return an error")
 	}
@@ -185,10 +190,11 @@ func TestFileMode0600(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	logger, err := Init(WithFile(logFile), WithLevel(slog.LevelInfo))
+	logger, cleanup, err := Init(WithFile(logFile), WithLevel(slog.LevelInfo))
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	// Write something so the file definitely exists.
 	logger.Info("permission test")
@@ -218,12 +224,13 @@ func TestWithStderr(t *testing.T) {
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = origStderr })
 
-	logger, initErr := Init(WithFile(logFile), WithStderr(), WithLevel(slog.LevelInfo))
+	logger, logCleanup, initErr := Init(WithFile(logFile), WithStderr(), WithLevel(slog.LevelInfo))
 	if initErr != nil {
 		w.Close()
 		os.Stderr = origStderr
 		t.Fatalf("Init() error: %v", initErr)
 	}
+	defer logCleanup()
 
 	logger.Info("tee test message")
 
@@ -253,10 +260,11 @@ func TestEnvVarLevel(t *testing.T) {
 	t.Setenv("LATERM_LOG_FILE", "")
 
 	// No WithLevel option — should pick up LATERM_LOG_LEVEL=error.
-	logger, err := Init(WithFile(logFile))
+	logger, cleanup, err := Init(WithFile(logFile))
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	if logger.Enabled(nil, slog.LevelWarn) {
 		t.Error("logger should NOT be enabled for Warn when env level is error")
@@ -272,10 +280,11 @@ func TestEnvVarFile(t *testing.T) {
 	t.Setenv("LATERM_LOG_FILE", logFile)
 
 	// No WithFile option — should pick up LATERM_LOG_FILE.
-	logger, err := Init()
+	logger, cleanup, err := Init()
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	logger.Info("env file test")
 
@@ -295,10 +304,11 @@ func TestOptionOverridesEnvVar(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "override.log")
 
 	// WithLevel(Error) should override env LATERM_LOG_LEVEL=debug.
-	logger, err := Init(WithFile(logFile), WithLevel(slog.LevelError))
+	logger, cleanup, err := Init(WithFile(logFile), WithLevel(slog.LevelError))
 	if err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
+	defer cleanup()
 
 	if logger.Enabled(nil, slog.LevelDebug) {
 		t.Error("option WithLevel(Error) should override env debug level")
@@ -322,12 +332,13 @@ func TestNeverWritesToStdout(t *testing.T) {
 	t.Setenv("LATERM_LOG_LEVEL", "")
 	t.Setenv("LATERM_LOG_FILE", "")
 
-	logger, initErr := Init(WithFile(logFile), WithStderr(), WithLevel(slog.LevelDebug))
+	logger, logCleanup, initErr := Init(WithFile(logFile), WithStderr(), WithLevel(slog.LevelDebug))
 	if initErr != nil {
 		w.Close()
 		os.Stdout = origStdout
 		t.Fatalf("Init() error: %v", initErr)
 	}
+	defer logCleanup()
 
 	// Write at every level.
 	logger.Debug("debug msg")
