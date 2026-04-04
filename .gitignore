@@ -15,7 +15,8 @@
 *.cullmeta
 build/
 lib/
-bin/
+bin/**/**
+!bin/
 !bin/laterm-darwin-arm64
 nohup.out
 .DS_Store
