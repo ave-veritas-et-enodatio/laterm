@@ -76,10 +76,13 @@ blocking defect.
    The sanitizer is stdlib-only; it does not import `go-latex` or any
    rendering package.
 
-10. **Panic recovery at dependency boundaries.** Every call into `go-latex`
-    and `go-sixel` must be wrapped in `recover()`. A panic from a dependency
-    results in the expression being flushed as literal text and a warning log
-    entry. The wrapper process must never crash due to a dependency panic.
+10. **Panic recovery at dependency boundaries.** Every call into
+    `internal/golatex` and `go-sixel` must be wrapped in `recover()`. A panic
+    from either results in the expression being flushed as literal text and a
+    warning log entry. The wrapper process must never crash due to a panic from
+    the rendering pipeline. `render.SafeRenderer` provides an additional
+    recovery wrapper around any `Renderer` implementation; `render.Select()`
+    wraps all renderers in `SafeRenderer` before returning them.
 
 11. **Rendering resource caps.** Parsing and rendering execute under a hard
     wall-clock timeout (goroutine + `select`, not trusting `go-latex`'s
@@ -130,13 +133,23 @@ blocking defect.
 laterm/
   cmd/laterm/              -- main: CLI args, startup, terminal restore, exit
   internal/
+    golatex/               -- Vendored go-latex v0.2.0 source with in-repo fixes
+      ast/                 -- AST node types
+      tex/                 -- TeX box model
+      mtex/                -- Visitor/handler layer (macro dispatch, most fixes here)
+        symbols/           -- Symbol tables
+      drawtex/             -- Canvas operations
+        drawimg/           -- Bitmap rendering (maxPixelDim=4096 cap)
+      font/ttf/            -- TTF font backend (fontFallback map for cal/bb/frak)
+      internal/            -- Internal symbol tables (tex2unicode)
+      token/               -- Token types
     pty/                   -- PTY lifecycle: spawn, raw/cooked, signal forwarding, resize
     stream/                -- Read loop, state machine integration, write coordination
     statemachine/          -- Pure delimiter detection, ANSI tracking, buffering, timeouts
     sanitize/              -- LaTeX allowlist validation, nesting depth, rejection
-    render/                -- Renderer interface + selection logic
-      unicode/             -- Unicode fallback renderer (stdlib only)
-      sixel/               -- Sixel renderer (go-latex + go-sixel, timeout + recovery)
+    render/                -- Renderer interface, SafeRenderer, FallbackRenderer, Select()
+      unicode/             -- Unicode fallback renderer (stdlib only, maxRenderDepth=100)
+      sixel/               -- Sixel renderer (internal/golatex + go-sixel, timeout + recovery)
     termcap/               -- DA1 query, Sixel detection, terminal size in cells + pixels
     logging/               -- slog configuration, file + stderr output, level management
   Makefile
@@ -171,7 +184,7 @@ laterm/
   flushed literals) to a single `io.Writer` (the user's terminal). Manages
   the post-math output buffer and its overflow fallback.
 - Imports: `statemachine`, `sanitize`, `render`, `logging`.
-- Must NOT import: `pty`, `termcap`, `creack/pty`, `go-latex`, `go-sixel`.
+- Must NOT import: `pty`, `termcap`, `creack/pty`, `internal/golatex`, `go-sixel`.
 - Owns the single write path to the user's terminal. No other package writes
   to stdout.
 
@@ -193,17 +206,17 @@ laterm/
 
 **`internal/sanitize/`**
 - Responsibility: Validate extracted LaTeX expressions against an explicit
-  allowlist of known-safe commands before they reach `go-latex`. Enforce a
-  nesting depth budget. Reject expressions containing any command not on the
+  allowlist of known-safe commands before they reach `internal/golatex`. Enforce
+  a nesting depth budget. Reject expressions containing any command not on the
   allowlist. Rejection means the entire expression is refused (not
   partially sanitized).
 - Imports: stdlib only. Specifically: `fmt`, `strings`.
-- Must NOT import: `go-latex`, `render`, `statemachine`, `pty`, `stream`.
+- Must NOT import: `internal/golatex`, `render`, `statemachine`, `pty`, `stream`.
 - The allowlist is a static data structure (map or set) defined in this
   package. It contains ~80-120 entries covering: Greek letters, operators,
-  relation symbols, arrows, delimiters, accents, font commands, spacing,
-  and common environments (e.g., `\frac`, `\sqrt`, `\sum`, `\int`,
-  `\lim`, `\begin{matrix}`, `\end{matrix}`).
+  relation symbols, arrows, delimiters, accents, font commands, and spacing
+  (e.g., `\frac`, `\sqrt`, `\sum`, `\int`, `\lim`, `\hat`, `\mathcal`).
+  `\begin`/`\end` environments are excluded until parser support is added.
 - The sanitizer is a pure function: `(expression string) -> (clean string,
   error)`. On rejection, the error describes which command was disallowed.
 - Nesting depth budget: configurable, default 20. Expressions exceeding it
@@ -237,24 +250,24 @@ laterm/
 - Imports: stdlib plus parent `render` package (for `Renderer` interface and
   `MathType`). This is standard Go — child importing parent creates no cycle
   since the parent does not import the child.
-- Must NOT import: `go-latex`, `go-sixel`, `render/sixel`.
+- Must NOT import: `internal/golatex`, `go-sixel`, `render/sixel`.
 
 **`internal/render/sixel/`**
-- Responsibility: Parse LaTeX via `go-latex`, render to `image.RGBA`, encode
-  to Sixel via `go-sixel`. Enforce wall-clock timeout around the entire
-  parse-render-encode pipeline. Cap image dimensions to terminal pixel
-  bounds. Wrap all `go-latex` and `go-sixel` calls in `recover()`.
-  On any failure (timeout, panic, oversized, error) return an error so the
-  caller can fall back.
-- Imports: `codeberg.org/go-latex/latex`, `github.com/mattn/go-sixel`,
-  `logging`.
+- Responsibility: Parse LaTeX via `internal/golatex`, render to `image.RGBA`,
+  encode to Sixel via `go-sixel`. Enforce wall-clock timeout around the entire
+  parse-render-encode pipeline. Cap image dimensions to terminal pixel bounds.
+  Wrap all `internal/golatex` and `go-sixel` calls in `recover()`. On any
+  failure (timeout, panic, oversized, error) return an error so the caller can
+  fall back.
+- Imports: `github.com/benn-herrera/laterm/internal/golatex/...`,
+  `github.com/mattn/go-sixel`, `logging`.
 - Must NOT import: `pty`, `stream`, `statemachine`, `sanitize`, `unicode/`.
 - Timeout: the entire Render call runs in a goroutine; the caller selects
   on the result channel and a context deadline. If the goroutine outlives
   the deadline, the result is discarded. Default timeout: 5 seconds for
   block math, 2 seconds for inline.
 - Panic recovery: a `defer recover()` inside the render goroutine catches
-  panics from `go-latex` and `go-sixel`, converts them to errors.
+  panics from `internal/golatex` and `go-sixel`, converts them to errors.
 - Image dimension cap: before Sixel encoding, check image bounds against
   terminal pixel dimensions from `termcap`. If either dimension exceeds
   the terminal, return an error (caller falls back to Unicode or literal).
@@ -295,15 +308,16 @@ cmd/laterm
 All packages -----> logging (for contract checks and diagnostics)
 
 External deps:
-  pty        --> github.com/creack/pty, golang.org/x/term
-  termcap    --> golang.org/x/term
-  render/sixel --> codeberg.org/go-latex/latex, github.com/mattn/go-sixel
+  pty          --> github.com/creack/pty, golang.org/x/term
+  termcap      --> golang.org/x/term
+  render/sixel --> internal/golatex/, github.com/mattn/go-sixel
+  golatex/     --> codeberg.org/go-fonts/*, golang.org/x/image (font rendering)
 ```
 
 Dependency direction is strictly downward. No cycles. `statemachine` and
-`sanitize` depend only on stdlib. The two external LaTeX/Sixel dependencies
-are confined to `render/sixel/`. The PTY dependency is confined to
-`internal/pty/`.
+`sanitize` depend only on stdlib. go-sixel is confined to `render/sixel/`.
+The PTY dependency is confined to `internal/pty/`. go-latex source lives in
+`internal/golatex/` and is imported only by `render/sixel/`.
 
 ### Dependency Justification
 
@@ -311,9 +325,16 @@ are confined to `render/sixel/`. The PTY dependency is confined to
 |---|---|---|
 | `github.com/creack/pty` | `internal/pty` | PTY creation and management. Go stdlib has no PTY support. Mature, widely used, pure Go. |
 | `golang.org/x/term` | `internal/pty`, `internal/termcap` | Terminal raw mode, state save/restore, size queries. Extended stdlib maintained by Go team. |
-| `codeberg.org/go-latex/latex` | `internal/render/sixel` | LaTeX parsing and rendering to image. Only known pure-Go LaTeX renderer. Confined behind sanitizer and timeout. |
 | `github.com/mattn/go-sixel` | `internal/render/sixel` | Sixel encoding from `image.Image`. Non-trivial protocol implementation. Confined behind panic recovery. |
+| `codeberg.org/go-fonts/*` | `internal/golatex/font/ttf` | Font data consumed by vendored go-latex font backend. Required for LaTeX glyph rendering. |
+| `golang.org/x/image` | `internal/golatex` | Image primitives used by vendored go-latex rendering pipeline. |
 | `golang.org/x/sys/unix` | `internal/termcap` | TIOCGWINSZ ioctl for terminal pixel dimensions. Extended stdlib maintained by Go team. Required because `golang.org/x/term` does not expose pixel dimensions. |
+| `codeberg.org/go-pdf/fpdf` | `internal/golatex/drawpdf` | Consumed by vendored go-latex rendering backends. `drawpdf` has no production caller; PDF output is not on the shipped code path. |
+| `git.sr.ht/~sbinet/gg` | `internal/golatex/drawimg` | Consumed by vendored go-latex rendering backends. |
+
+`codeberg.org/go-latex/latex` is no longer an external dependency. Its source
+is vendored at `internal/golatex/` with import paths rewritten to the project
+module path.
 
 No other external dependencies are permitted without updating this table and
 providing justification.
@@ -387,8 +408,9 @@ complete. Organized by component, in implementation priority order.
   (`\leq`, `\geq`, `\neq`, `\approx`, `\equiv`, etc.), arrows
   (`\rightarrow`, `\leftarrow`, `\Rightarrow`, etc.), delimiters (`\left`,
   `\right`, `\big`, `\Big`, etc.), accents (`\hat`, `\bar`, `\tilde`,
-  `\vec`, etc.), environments (`\begin`, `\end` with allowed environment
-  names), and spacing commands (`\,`, `\;`, `\quad`, `\qquad`, etc.).
+  `\vec`, etc.), and spacing commands (`\,`, `\;`, `\quad`, `\qquad`, etc.).
+  `\begin`/`\end` environments are not currently allowed — they were removed
+  from the allowlist because the parser does not yet support them.
 - The sanitizer has no dependency on `go-latex`. It operates on the raw
   LaTeX string using its own command extraction logic.
 - Expressions with no backslash commands (e.g., `x + y = z`, `2^{10}`)
@@ -419,8 +441,8 @@ complete. Organized by component, in implementation priority order.
   renderer returns an error (caller falls back).
 - Rendering completes within the wall-clock timeout (default 2s inline, 5s
   block). If it does not, the result is discarded and an error is returned.
-- A panic in `go-latex` during parsing does not crash the process; it is
-  recovered, logged, and results in fallback.
+- A panic in `internal/golatex` during parsing does not crash the process; it
+  is recovered, logged, and results in fallback.
 - A panic in `go-sixel` during encoding does not crash the process; same
   recovery behavior.
 - DA1 capability detection correctly identifies Sixel support (attribute `4`
@@ -510,12 +532,15 @@ User's terminal (stdout) <------+
 - **go-latex fidelity**: The sanitizer restricts LaTeX to a safe subset.
   Some valid LaTeX that uses advanced features (custom macros, package
   imports, catcode manipulation) will be rejected and displayed as literal
-  text. This is a deliberate security/functionality tradeoff. Note:
-  go-latex v0.2.0 is incomplete and panics on many common LaTeX constructs
-  (`\mathcal`, `\left`/`\right`, `\text`, parentheses in math mode).
-  These panics are caught by `recover()` and cascade to Unicode fallback.
-  A planned replacement with KaTeX + wazero will resolve this limitation
-  (see `.claude/katex_rendering.md`).
+  text. This is a deliberate security/functionality tradeoff. go-latex v0.2.0
+  source is vendored at `internal/golatex/` with fixes applied for common
+  constructs (`\mathcal`, `\mathbb`, `\left`/`\right`, `\text`, parentheses
+  in math mode, `\operatorname`, accents, and others). Remaining unimplemented
+  handlers still panic; these are caught by `recover()` and cascade to Unicode
+  fallback. `internal/golatex/mtex/fixes_test.go` tracks known-broken
+  constructs with `stillPanics` flags. A planned replacement with KaTeX +
+  wazero will resolve this limitation more completely (see
+  `.claude/katex_rendering.md`).
 
 - **Unicode rendering fidelity**: Unicode approximation of math is lossy.
   Complex expressions (matrices, multi-level fractions) may not render

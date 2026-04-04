@@ -44,13 +44,23 @@ bin/laterm python3
 ```
 cmd/laterm/          CLI entry point. Wires all internal packages.
 internal/
+  golatex/           Vendored go-latex v0.2.0 source with in-repo fixes.
+    ast/             AST node types.
+    tex/             TeX box model.
+    mtex/            Visitor/handler layer (macro dispatch). Most fixes live here.
+      symbols/       Symbol tables.
+    drawtex/         Canvas operations.
+      drawimg/       Bitmap rendering. maxPixelDim=4096 cap on allocation.
+    font/ttf/        TTF font backend. fontFallback map for cal/bb/frak types.
+    internal/        Internal symbol tables (tex2unicode).
+    token/           Token types.
   pty/               PTY lifecycle: spawn, raw mode, signal forwarding, resize.
   stream/            Read loop, state machine integration, single write path.
   statemachine/      Pure delimiter detection, ANSI tracking, byte/time budgets.
   sanitize/          LaTeX allowlist validation, nesting depth enforcement.
-  render/            Renderer interface and capability-based selection.
-    unicode/         Unicode fallback renderer. Stdlib only.
-    sixel/           Sixel renderer. go-latex + go-sixel. Timeout + recovery.
+  render/            Renderer interface, SafeRenderer, FallbackRenderer, Select().
+    unicode/         Unicode fallback renderer. Stdlib only. maxRenderDepth=100.
+    sixel/           Sixel renderer. internal/golatex + go-sixel. Timeout + recovery.
   termcap/           DA1 capability query, terminal size in cells and pixels.
   logging/           slog configuration, file + stderr output, level management.
 ```
@@ -84,7 +94,8 @@ variable; `$X` followed by `_`, `^`, `\`, `{`, digit, operator → math.
 allowlist of ~80–120 known-safe commands before it reaches go-latex. Enforces
 nesting depth budget (default 20). Rejection is all-or-nothing: on any unknown
 command the entire expression is refused. Pure function: `(string) -> (string,
-error)`.
+error)`. `\begin`/`\end` environments are not currently allowed — they were
+removed from the allowlist because the parser does not yet support them.
 
 **`internal/render/`** — Defines the `Renderer` interface:
 `Render(ctx, latex string, maxWidth int) ([]byte, error)`. Implements
@@ -99,10 +110,11 @@ recursive rendering of `\command` in subscript position), font-style commands
 accents, and ~140 command mappings. Unknown macros pass through as raw LaTeX.
 No external dependencies.
 
-**`internal/render/sixel/`** — Parses LaTeX via go-latex, renders to
+**`internal/render/sixel/`** — Parses LaTeX via `internal/golatex`, renders to
 `image.RGBA`, encodes to Sixel via go-sixel. Enforces wall-clock timeout
-(goroutine + select). Caps image dimensions to terminal pixel bounds. All
-go-latex and go-sixel calls wrapped in `recover()`.
+(goroutine + select). Caps image dimensions to terminal pixel bounds. The
+render goroutine has a `recover()` that catches panics from remaining
+unimplemented handlers in the vendored code.
 
 **`internal/termcap/`** — Sends DA1 (`\x1b[c`) and parses the response to
 detect Sixel support (attribute `4`). Queries terminal size in cells and
@@ -125,9 +137,10 @@ These are invariants from ARCHITECTURE.md. Violating any is a blocking defect.
   `logging` for contract-check violations.
 - **Only `stream` writes to stdout.** No other package may write to
   `os.Stdout`. Logging goes to file or stderr.
-- **External deps confined to `render/sixel/`.** `codeberg.org/go-latex/latex`
-  and `github.com/mattn/go-sixel` are imported only in `internal/render/sixel/`.
-  No other package imports them.
+- **go-latex source confined to `internal/golatex/`.** `internal/render/sixel/`
+  imports from `internal/golatex/` and `github.com/mattn/go-sixel`. No other
+  package imports either. `codeberg.org/go-latex/latex` is no longer an
+  external dependency.
 - **`pty` dependency confined to `internal/pty/`.** No other package imports
   `github.com/creack/pty`.
 
@@ -141,7 +154,7 @@ cmd/laterm
   |       |    \--> sanitize
   |       |     \-> render (interface)
   +---> render ---> render/unicode
-  |       |    \--> render/sixel
+  |       |    \--> render/sixel ---> internal/golatex/
   +---> termcap
   +---> logging
 
@@ -242,9 +255,15 @@ Current direct dependencies:
 |---|---|
 | `github.com/creack/pty` | `internal/pty/` |
 | `golang.org/x/term` | `internal/pty/`, `internal/termcap/` |
-| `codeberg.org/go-latex/latex` | `internal/render/sixel/` |
 | `github.com/mattn/go-sixel` | `internal/render/sixel/` |
 | `golang.org/x/sys/unix` | `internal/termcap/` |
+| `codeberg.org/go-pdf/fpdf` | `internal/golatex/drawpdf/` |
+| `git.sr.ht/~sbinet/gg` | `internal/golatex/drawimg/` |
+
+`codeberg.org/go-latex/latex` has been replaced by the vendored copy at
+`internal/golatex/`. The go-latex font dependencies (`codeberg.org/go-fonts/*`,
+`golang.org/x/image`, `github.com/golang/freetype`) remain as external deps consumed
+by `internal/golatex/`.
 
 Transitive indirect dependencies are tracked in `go.sum` and must not be
 imported directly.
@@ -312,3 +331,71 @@ an error.
 The sanitizer either returns the original expression string unchanged or
 returns an error. It does not return a modified or trimmed expression. If you
 extend the sanitizer, preserve this contract.
+
+---
+
+## Vendored go-latex (`internal/golatex/`)
+
+go-latex v0.2.0 source is copied into `internal/golatex/` with import paths
+rewritten from `codeberg.org/go-latex/latex/...` to
+`github.com/benn-herrera/laterm/internal/golatex/...`. All fixes are made
+in-repo; the external module is not used.
+
+### Dual macro registry
+
+There are two parallel macro registries that must stay in sync:
+
+- **Parser level**: `internal/golatex/macros.go` — registers commands so the
+  scanner/parser recognizes them and captures the right number of arguments.
+- **mtex level**: `internal/golatex/mtex/macros.go` — registers the same
+  commands so the visitor/handler layer knows how to render them.
+
+Adding a new LaTeX command requires entries in **both** files with matching
+argument signatures. A mismatch causes silent mis-rendering or a runtime
+panic.
+
+### Sanitizer allowlist sync
+
+`internal/sanitize/allowlist.go` must only contain commands that have
+corresponding handlers in the parser and mtex layers. Every entry in the
+allowlist carries a source comment indicating where the handler lives. Before
+adding a command to the allowlist, verify a working handler exists.
+
+`\begin`/`\end` environments are not currently in the allowlist because the
+parser panics on `\begin`. Re-enable them once the parser gains environment
+support.
+
+### Font backend fallback
+
+`internal/golatex/font/ttf/ttf.go` has a `fontFallback` map that resolves
+font types like `"cal"`, `"bb"`, and `"frak"` to the nearest available font
+when the exact font is not loaded. If you add support for a new font type,
+add a fallback entry here.
+
+### Remaining panic sites
+
+Unimplemented handlers in `internal/golatex/font/ttf/ttf.go` still `panic`
+rather than return errors. Fixing them cleanly requires changing the
+`font.Backend` interface, which is deferred. For now they are caught by the
+sixel renderer's `recover()` and cascade to Unicode fallback. Do not add new
+panics; convert genuine errors to `error` returns.
+
+### Bitmap allocation cap
+
+`internal/golatex/drawtex/drawimg/drawimg.go` caps bitmap allocation at
+`maxPixelDim=4096` pixels per side. Expressions that would produce a larger
+image return an error instead of allocating.
+
+### Test pattern for known-unfixed handlers
+
+`internal/golatex/mtex/fixes_test.go` tracks expressions against known-broken
+handlers using a `stillPanics bool` field per test case:
+
+- `stillPanics: true` — handler is not yet implemented; the test skips the
+  render and records the expression as a known failure.
+- `stillPanics: false` — handler exists; the test asserts it renders without
+  panicking.
+
+When you add a handler, flip the flag to `false`. `TestStillPanics_Smoke`
+runs all `stillPanics: true` cases and fails if any of them no longer panic
+(i.e., it catches stale annotations). Keep these flags accurate.

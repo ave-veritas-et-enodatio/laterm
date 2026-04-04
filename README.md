@@ -68,7 +68,7 @@ Logs are never written to stdout. Raw child-process content is only logged at `d
 
 **SIGKILL and OOM.** If `laterm` is killed by SIGKILL or terminated by OOM, the terminal may be left in raw mode. Run `reset` to recover. This is inherent to any program that puts the terminal in raw mode.
 
-**LaTeX allowlist.** The sanitizer accepts a fixed subset of LaTeX commands (Greek letters, common operators, standard environments, etc.). Expressions using custom macros, package imports, or advanced features like `\def` or `\catcode` are rejected and displayed as literal text. This is a deliberate security tradeoff.
+**LaTeX subset only.** The sanitizer accepts a fixed set of LaTeX commands — Greek letters, common operators, fractions, square roots, subscripts, superscripts, accents, font commands (`\mathcal`, `\mathbb`, `\mathrm`, `\text`, `\operatorname`, etc.), and standard delimiters and arrows. Expressions using custom macros, `\begin`/`\end` environments, package imports, or advanced features like `\def` or `\catcode` are rejected and displayed as literal text. This is a deliberate security tradeoff. Some complex expressions that pass the sanitizer may fall back to Unicode rendering if the Sixel renderer cannot handle them; the `|` token in math mode is not yet supported.
 
 **Unicode rendering fidelity.** Unicode math rendering is a best-effort approximation. Complex expressions — matrices, multi-level fractions, deeply nested structures — may not render readably in Unicode mode. Use a Sixel-capable terminal for full fidelity.
 
@@ -103,5 +103,7 @@ The binary is written to `bin/laterm`. Additional make targets:
 | [`github.com/creack/pty`](https://github.com/creack/pty) | Thomas Roccia (creack) | MIT | PTY creation and management |
 | [`golang.org/x/term`](https://pkg.go.dev/golang.org/x/term) | Go Authors | BSD-3-Clause | Terminal raw mode, state save/restore, size queries |
 | [`golang.org/x/sys/unix`](https://pkg.go.dev/golang.org/x/sys) | Go Authors | BSD-3-Clause | Terminal pixel dimension queries (TIOCGWINSZ) |
-| [`codeberg.org/go-latex/latex`](https://codeberg.org/go-latex/latex) | go-latex contributors | BSD-3-Clause | LaTeX parsing and rendering to image |
 | [`github.com/mattn/go-sixel`](https://github.com/mattn/go-sixel) | Yasuhiro Matsumoto (mattn) | MIT | Sixel encoding from Go images |
+| go-latex v0.2.0 (vendored) | go-latex contributors | BSD-3-Clause | LaTeX parsing and rendering to image; source vendored at `internal/golatex/` with in-repo fixes |
+| [`codeberg.org/go-fonts/*`](https://codeberg.org/go-fonts) | go-latex contributors | OFL-1.1 | Font data consumed by the vendored go-latex font backend |
+| [`golang.org/x/image`](https://pkg.go.dev/golang.org/x/image) | Go Authors | BSD-3-Clause | Image primitives used by the vendored go-latex rendering pipeline |
