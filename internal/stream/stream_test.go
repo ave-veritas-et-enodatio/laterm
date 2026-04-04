@@ -94,12 +94,41 @@ func (w *syncWriter) Bytes() []byte {
 	return append([]byte(nil), w.buf.Bytes()...)
 }
 
+// mustNewLoop is a test helper that calls NewLoop and fails the test on error.
+func mustNewLoop(t *testing.T, cfg Config) *Loop {
+	t.Helper()
+	loop, err := NewLoop(cfg)
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	return loop
+}
+
+func TestNewLoopNilFields(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{"nil Reader", Config{Writer: &syncWriter{}, Machine: statemachine.New(statemachine.Config{})}},
+		{"nil Writer", Config{Reader: strings.NewReader(""), Machine: statemachine.New(statemachine.Config{})}},
+		{"nil Machine", Config{Reader: strings.NewReader(""), Writer: &syncWriter{}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewLoop(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for missing required field, got nil")
+			}
+		})
+	}
+}
+
 func TestPlainTextPassthrough(t *testing.T) {
 	input := "hello world\n"
 	reader := strings.NewReader(input)
 	writer := &syncWriter{}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -123,7 +152,7 @@ func TestANSIPassthrough(t *testing.T) {
 	reader := strings.NewReader(input)
 	writer := &syncWriter{}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -157,7 +186,7 @@ func TestShellVariablePassthrough(t *testing.T) {
 			reader := strings.NewReader(tt.input)
 			writer := &syncWriter{}
 
-			loop := NewLoop(Config{
+			loop := mustNewLoop(t, Config{
 				Reader:    reader,
 				Writer:    writer,
 				Machine:   statemachine.New(statemachine.Config{}),
@@ -184,7 +213,7 @@ func TestInlineMathRender(t *testing.T) {
 
 	fr := &fakeRenderer{result: []byte("[rendered:sigma]")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -225,7 +254,7 @@ func TestBlockMathRender(t *testing.T) {
 
 	fr := &fakeRenderer{result: []byte("[rendered:integral]")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -262,7 +291,7 @@ func TestRenderFailureFallsBackToLiteral(t *testing.T) {
 
 	fr := &fakeRenderer{err: errors.New("render failed")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -292,7 +321,7 @@ func TestSanitizerRejectionFallsBackToLiteral(t *testing.T) {
 
 	fr := &fakeRenderer{result: []byte("should not appear")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -325,7 +354,7 @@ func TestNoRendererFlushesLiteral(t *testing.T) {
 	reader := strings.NewReader(input)
 	writer := &syncWriter{}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -363,7 +392,7 @@ func TestPostMathBuffering(t *testing.T) {
 		delay:  100 * time.Millisecond,
 	}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -399,7 +428,7 @@ func TestPostMathBufferOverflow(t *testing.T) {
 		delay:  200 * time.Millisecond,
 	}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:          reader,
 		Writer:          writer,
 		Machine:         statemachine.New(statemachine.Config{}),
@@ -434,7 +463,7 @@ func TestContextCancellation(t *testing.T) {
 
 	writer := &syncWriter{}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    pr,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -480,7 +509,7 @@ func TestUpdateMaxWidth(t *testing.T) {
 		},
 	}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -510,7 +539,7 @@ func TestTimeBudgetExpiry(t *testing.T) {
 
 	writer := &syncWriter{}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:        pr,
 		Writer:        writer,
 		Machine:       statemachine.New(statemachine.Config{}),
@@ -564,7 +593,7 @@ func TestConsecutiveMathExpressions(t *testing.T) {
 		},
 	}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -593,7 +622,7 @@ func TestBlockMathFallbackLiteral(t *testing.T) {
 
 	fr := &fakeRenderer{err: errors.New("render failed")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -646,7 +675,7 @@ func TestMixedContentOrdering(t *testing.T) {
 
 	fr := &fakeRenderer{result: []byte("[MATH]")}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:    reader,
 		Writer:    writer,
 		Machine:   statemachine.New(statemachine.Config{}),
@@ -681,13 +710,14 @@ func TestRenderTimeout(t *testing.T) {
 		},
 	}
 
-	loop := NewLoop(Config{
+	loop := mustNewLoop(t, Config{
 		Reader:        reader,
 		Writer:        writer,
 		Machine:       statemachine.New(statemachine.Config{}),
 		Sanitizer:     sanitize.New(sanitize.Config{}),
 		Renderer:      fr,
-		RenderTimeout: 50 * time.Millisecond,
+		InlineRenderTimeout: 50 * time.Millisecond,
+		BlockRenderTimeout:  50 * time.Millisecond,
 	})
 
 	err := loop.Run(context.Background())

@@ -1,7 +1,7 @@
 OUT ?= bin/laterm
 DIST ?= dist/laterm-darwin-arm64
 
-.PHONY: all build test integration-test clean lint fmt dist
+.PHONY: all build test integration-test clean lint fmt dist dequarantine
 
 all: build test
 
@@ -26,3 +26,6 @@ fmt:
 dist:
 	@mkdir -p $(dir $(DIST))
 	@$(MAKE) OUT=$(DIST) build
+
+dequarantine:
+	xattr -d com.apple.quarantine $(DIST)

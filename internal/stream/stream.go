@@ -23,7 +23,8 @@ import (
 const (
 	defaultInlineTimeout  = 200 * time.Millisecond
 	defaultBlockTimeout   = 10 * time.Second
-	defaultRenderTimeout  = 5 * time.Second
+	defaultInlineRenderTimeout = 2 * time.Second
+	defaultBlockRenderTimeout  = 5 * time.Second
 	defaultPostMathBufSz  = 32768
 	defaultMaxWidth       = 80
 	readBufSize           = 4096
@@ -41,7 +42,8 @@ type Config struct {
 	MaxWidth        int           // terminal width in columns for rendering
 	InlineTimeout   time.Duration // time budget for inline math (default 200ms)
 	BlockTimeout    time.Duration // time budget for block math (default 10s)
-	RenderTimeout   time.Duration // wall-clock timeout for rendering (default 5s)
+	InlineRenderTimeout time.Duration // wall-clock timeout for inline rendering (default 2s)
+	BlockRenderTimeout  time.Duration // wall-clock timeout for block rendering (default 5s)
 	PostMathBufSize int           // max bytes to buffer during render (default 32768)
 }
 
@@ -58,8 +60,11 @@ func (c Config) withDefaults() Config {
 	if c.BlockTimeout <= 0 {
 		c.BlockTimeout = defaultBlockTimeout
 	}
-	if c.RenderTimeout <= 0 {
-		c.RenderTimeout = defaultRenderTimeout
+	if c.InlineRenderTimeout <= 0 {
+		c.InlineRenderTimeout = defaultInlineRenderTimeout
+	}
+	if c.BlockRenderTimeout <= 0 {
+		c.BlockRenderTimeout = defaultBlockRenderTimeout
 	}
 	if c.PostMathBufSize <= 0 {
 		c.PostMathBufSize = defaultPostMathBufSz
@@ -77,9 +82,8 @@ type Loop struct {
 	overflow  bool       // true if postBuf exceeded its limit during render
 	postBuf   []byte     // bytes buffered while a render is in flight
 
-	// renderDone is signaled when the render goroutine finishes. The main
-	// loop checks this to clear the rendering flag after flushing postBuf.
-	renderDone chan struct{}
+	renderWg  sync.WaitGroup // tracks in-flight render goroutines
+	renderSem chan struct{}   // bounds concurrent render goroutines
 
 	// timeBudget carries the result of a time-budget expiry from the timer
 	// goroutine to the main loop. The timer goroutine sends; the main loop
@@ -96,26 +100,26 @@ type Loop struct {
 }
 
 // NewLoop creates a new stream processing loop with the given configuration.
-// The caller must provide non-nil Reader, Writer, Machine, and Sanitizer.
-// Renderer may be nil, in which case math expressions are flushed as literal text.
-func NewLoop(cfg Config) *Loop {
+// The caller must provide non-nil Reader, Writer, and Machine. Renderer may be
+// nil, in which case math expressions are flushed as literal text.
+func NewLoop(cfg Config) (*Loop, error) {
 	cfg = cfg.withDefaults()
 
 	if cfg.Reader == nil {
-		cfg.Logger.Error("stream.NewLoop: nil Reader")
+		return nil, errors.New("stream.NewLoop: nil Reader")
 	}
 	if cfg.Writer == nil {
-		cfg.Logger.Error("stream.NewLoop: nil Writer")
+		return nil, errors.New("stream.NewLoop: nil Writer")
 	}
 	if cfg.Machine == nil {
-		cfg.Logger.Error("stream.NewLoop: nil Machine")
+		return nil, errors.New("stream.NewLoop: nil Machine")
 	}
 
 	return &Loop{
 		cfg:        cfg,
-		renderDone: make(chan struct{}, 1),
+		renderSem:  make(chan struct{}, 4),
 		timeBudget: make(chan struct{}, 1),
-	}
+	}, nil
 }
 
 // UpdateMaxWidth updates the terminal width used for rendering. It is safe to
@@ -263,6 +267,16 @@ func (l *Loop) dispatchRender(content string, isBlock bool) {
 	// back-to-back with the first still rendering.
 	l.waitForRender()
 
+	// Acquire a render semaphore slot. If all slots are taken, flush as
+	// literal to avoid unbounded goroutine accumulation.
+	select {
+	case l.renderSem <- struct{}{}:
+	default:
+		l.cfg.Logger.Debug("stream: render skipped, concurrency limit reached")
+		l.flushRawExpression(content, isBlock)
+		return
+	}
+
 	l.mu.Lock()
 	l.rendering = true
 	l.overflow = false
@@ -279,20 +293,20 @@ func (l *Loop) dispatchRender(content string, isBlock bool) {
 	maxWidth := l.cfg.MaxWidth
 	l.mu.Unlock()
 
+	l.renderWg.Add(1)
 	go l.renderAndWrite(content, isBlock, mathType, maxWidth)
 }
 
 // renderAndWrite runs in a goroutine. It sanitizes, renders, and writes the
 // result to the terminal, then flushes the post-math buffer.
 func (l *Loop) renderAndWrite(content string, isBlock bool, mathType render.MathType, maxWidth int) {
-	defer func() {
-		l.renderDone <- struct{}{}
-	}()
+	defer l.renderWg.Done()
+	defer func() { <-l.renderSem }()
 
 	// 1. Sanitize.
 	if l.cfg.Sanitizer != nil {
 		if err := l.cfg.Sanitizer.Check(content); err != nil {
-			l.cfg.Logger.Info("stream: sanitizer rejected expression",
+			l.cfg.Logger.Debug("stream: sanitizer rejected expression",
 				slog.String("error", err.Error()),
 			)
 			l.finishRender(nil, content, isBlock)
@@ -300,8 +314,12 @@ func (l *Loop) renderAndWrite(content string, isBlock bool, mathType render.Math
 		}
 	}
 
-	// 2. Render with timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), l.cfg.RenderTimeout)
+	// 2. Render with timeout — inline gets a shorter budget than block.
+	timeout := l.cfg.InlineRenderTimeout
+	if isBlock {
+		timeout = l.cfg.BlockRenderTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	rendered, err := l.cfg.Renderer.Render(ctx, content, mathType, maxWidth)
@@ -376,13 +394,7 @@ func (l *Loop) flushRawExpression(content string, isBlock bool) {
 
 // waitForRender blocks until any in-flight render goroutine finishes.
 func (l *Loop) waitForRender() {
-	l.mu.Lock()
-	isRendering := l.rendering
-	l.mu.Unlock()
-
-	if isRendering {
-		<-l.renderDone
-	}
+	l.renderWg.Wait()
 }
 
 // startTimeBudget starts or resets the time-budget timer. When the timer fires,

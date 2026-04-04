@@ -91,7 +91,7 @@ func main() {
 	}
 	defer session.Close()
 
-	// 6. Panic recovery. Registered after session.Close so it runs after
+	// 6. Panic recovery. Registered after session.Close so it runs before
 	//    Close (LIFO order). RestoreTerminal is idempotent, so calling it
 	//    here ensures the terminal is restored even if Close hasn't run yet.
 	defer func() {
@@ -114,6 +114,12 @@ func main() {
 	exitSigs := make(chan os.Signal, 1)
 	signal.Notify(exitSigs, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				session.RestoreTerminal()
+				logger.Error("panic in goroutine", slog.Any("error", r))
+			}
+		}()
 		sig := <-exitSigs
 		session.RestoreTerminal()
 		logger.Info("laterm: caught signal, exiting", slog.String("signal", sig.String()))
@@ -124,30 +130,41 @@ func main() {
 
 	// 8. Copy stdin to child PTY.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				session.RestoreTerminal()
+				logger.Error("panic in goroutine", slog.Any("error", r))
+			}
+		}()
 		_, _ = io.Copy(session.Writer(), os.Stdin)
 	}()
 
 	// 9. Create and run the stream loop.
 	machine := statemachine.New(statemachine.Config{})
 	san := sanitize.New(sanitize.Config{})
-	loop := stream.NewLoop(stream.Config{
+	loop, err := stream.NewLoop(stream.Config{
 		Reader:    session.Reader(),
 		Writer:    os.Stdout,
 		Machine:   machine,
 		Sanitizer: san,
 		Renderer:  renderer,
 		Logger:    logger,
-		MaxWidth:  caps.WidthCells,
+		MaxWidth:  caps.WidthPixels,
 	})
+	if err != nil {
+		session.RestoreTerminal()
+		logger.Error("laterm: create stream loop", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
 
 	// Now wire up signal forwarding with the resize callback.
 	stopSignals := session.ForwardSignals(func() {
-		cols, _, _, _, sizeErr := termcap.GetSize(os.Stdin.Fd())
+		_, _, pxWidth, _, sizeErr := termcap.GetSize(os.Stdin.Fd())
 		if sizeErr != nil {
 			logger.Warn("laterm: get size on resize", slog.String("error", sizeErr.Error()))
 			return
 		}
-		loop.UpdateMaxWidth(cols)
+		loop.UpdateMaxWidth(pxWidth)
 	})
 	defer stopSignals()
 

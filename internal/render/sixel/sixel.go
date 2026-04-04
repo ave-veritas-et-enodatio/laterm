@@ -127,48 +127,56 @@ func (r *Renderer) Render(ctx context.Context, expr string, mathType render.Math
 // renderPipeline executes the parse → render-to-image → check-size → sixel-encode
 // sequence. Called only from within the recovery goroutine.
 func (r *Renderer) renderPipeline(expr string, mathType render.MathType, widthLimit int) ([]byte, error) {
-	// Step 1: Render LaTeX to a PNG in memory via go-latex.
-	img, err := r.latexToImage(expr, mathType)
+	// Step 1: Render LaTeX to a compressed PNG in memory via go-latex.
+	pngData, err := r.latexToPNG(expr, mathType)
 	if err != nil {
 		return nil, fmt.Errorf("latex render: %w", err)
 	}
 
-	// Step 2: Check image dimensions.
-	bounds := img.Bounds()
-	imgW := bounds.Dx()
-	imgH := bounds.Dy()
+	// Step 2: Check image dimensions from the PNG header only — this reads
+	// a few dozen bytes and does NOT allocate the full decompressed bitmap.
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngData))
+	if err != nil {
+		return nil, fmt.Errorf("png header: %w", err)
+	}
 
-	if imgW > widthLimit || imgH > r.maxPixelHeight {
+	if cfg.Width > widthLimit || cfg.Height > r.maxPixelHeight {
 		r.logger.Warn("rendered image exceeds size limits",
-			slog.Int("img_width", imgW),
-			slog.Int("img_height", imgH),
+			slog.Int("img_width", cfg.Width),
+			slog.Int("img_height", cfg.Height),
 			slog.Int("max_width", widthLimit),
 			slog.Int("max_height", r.maxPixelHeight),
 		)
 		return nil, ErrImageTooLarge
 	}
 
-	// Step 3: Encode image as Sixel.
+	// Step 3: Full decode — dimensions are safe, allocate the bitmap.
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		return nil, fmt.Errorf("png decode: %w", err)
+	}
+
+	// Step 4: Encode image as Sixel.
 	sixelBytes, err := r.encodeToSixel(img)
 	if err != nil {
 		return nil, fmt.Errorf("sixel encode: %w", err)
 	}
 
 	r.logger.Debug("sixel render complete",
-		slog.Int("img_width", imgW),
-		slog.Int("img_height", imgH),
+		slog.Int("img_width", cfg.Width),
+		slog.Int("img_height", cfg.Height),
 		slog.Int("sixel_bytes", len(sixelBytes)),
 	)
 
 	return sixelBytes, nil
 }
 
-// latexToImage parses the LaTeX expression and renders it to an image.Image.
+// latexToPNG parses the LaTeX expression and renders it to compressed PNG bytes.
 //
-// go-latex's drawimg.Renderer writes PNG to an io.Writer. We capture that PNG
-// and decode it back to an image. This avoids duplicating the rendering logic
-// in drawimg (which depends on the gg 2D graphics library).
-func (r *Renderer) latexToImage(expr string, mathType render.MathType) (image.Image, error) {
+// go-latex's drawimg.Renderer writes PNG to an io.Writer. We return the raw
+// PNG so the caller can inspect dimensions cheaply via png.DecodeConfig before
+// committing to a full decode.
+func (r *Renderer) latexToPNG(expr string, mathType render.MathType) ([]byte, error) {
 	// The go-latex parser expects the expression wrapped in math delimiters.
 	// Ensure the expression is properly delimited.
 	wrapped := wrapExpr(expr, mathType)
@@ -184,12 +192,7 @@ func (r *Renderer) latexToImage(expr string, mathType render.MathType) (image.Im
 		return nil, fmt.Errorf("mtex.Render: %w", err)
 	}
 
-	img, err := png.Decode(&pngBuf)
-	if err != nil {
-		return nil, fmt.Errorf("png.Decode: %w", err)
-	}
-
-	return img, nil
+	return pngBuf.Bytes(), nil
 }
 
 // wrapExpr ensures the expression has appropriate LaTeX math delimiters.

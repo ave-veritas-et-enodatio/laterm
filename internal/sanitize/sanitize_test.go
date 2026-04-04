@@ -231,6 +231,143 @@ func TestCheck_NonLetterBackslashSequences(t *testing.T) {
 	}
 }
 
+func TestCheck_ControlCharacters(t *testing.T) {
+	t.Parallel()
+	s := New(Config{})
+
+	tests := []struct {
+		name    string
+		expr    string
+		wantErr bool
+		wantSub string
+	}{
+		{
+			name:    "ESC byte rejected",
+			expr:    "x + \x1b[31m red",
+			wantErr: true,
+			wantSub: "0x1b",
+		},
+		{
+			name:    "null byte rejected",
+			expr:    "x\x00y",
+			wantErr: true,
+			wantSub: "0x00",
+		},
+		{
+			name:    "SOH rejected",
+			expr:    "\x01hello",
+			wantErr: true,
+			wantSub: "0x01",
+		},
+		{
+			name:    "tab allowed",
+			expr:    "x\t+ y",
+			wantErr: false,
+		},
+		{
+			name:    "newline allowed",
+			expr:    "x\n+ y",
+			wantErr: false,
+		},
+		{
+			name:    "carriage return allowed",
+			expr:    "x\r\n+ y",
+			wantErr: false,
+		},
+		{
+			name:    "ESC at position 0",
+			expr:    "\x1b[0m",
+			wantErr: true,
+			wantSub: "position 0",
+		},
+		{
+			name:    "control char position reported",
+			expr:    "abc\x1bdef",
+			wantErr: true,
+			wantSub: "position 3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := s.Check(tt.expr)
+			if tt.wantErr && err == nil {
+				t.Fatalf("Check(%q) = nil, want error containing %q", tt.expr, tt.wantSub)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Check(%q) = %v, want nil", tt.expr, err)
+			}
+			if tt.wantErr && err != nil && !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("Check(%q) error = %q, want substring %q", tt.expr, err.Error(), tt.wantSub)
+			}
+		})
+	}
+}
+
+func TestCheck_ExpressionLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		maxLen    int
+		exprLen   int
+		wantErr   bool
+		wantSub   string
+	}{
+		{
+			name:    "exceeds default limit",
+			maxLen:  0, // use default (8192)
+			exprLen: 8193,
+			wantErr: true,
+			wantSub: "exceeds maximum",
+		},
+		{
+			name:    "at default limit passes",
+			maxLen:  0,
+			exprLen: 8192,
+			wantErr: false,
+		},
+		{
+			name:    "exceeds custom limit",
+			maxLen:  100,
+			exprLen: 101,
+			wantErr: true,
+			wantSub: "exceeds maximum",
+		},
+		{
+			name:    "at custom limit passes",
+			maxLen:  100,
+			exprLen: 100,
+			wantErr: false,
+		},
+		{
+			name:    "well under limit",
+			maxLen:  100,
+			exprLen: 10,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(Config{MaxExprLength: tt.maxLen})
+			expr := strings.Repeat("x", tt.exprLen)
+			err := s.Check(expr)
+			if tt.wantErr && err == nil {
+				t.Fatalf("Check(len=%d) = nil, want error", tt.exprLen)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Check(len=%d) = %v, want nil", tt.exprLen, err)
+			}
+			if tt.wantErr && err != nil && !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("Check(len=%d) error = %q, want substring %q", tt.exprLen, err.Error(), tt.wantSub)
+			}
+		})
+	}
+}
+
 func FuzzCheck(f *testing.F) {
 	f.Add(`\frac{\alpha}{\beta}`)
 	f.Add(`\input{/etc/passwd}`)
@@ -244,6 +381,8 @@ func FuzzCheck(f *testing.F) {
 	f.Add(`\end{}`)
 	f.Add(`$plain text$`)
 	f.Add(`\left(\frac{a}{b}\right)`)
+	f.Add("x\x1b[31mred")
+	f.Add("\x00\x01\x02")
 
 	s := New(Config{})
 	f.Fuzz(func(t *testing.T, expr string) {

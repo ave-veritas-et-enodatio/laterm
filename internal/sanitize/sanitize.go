@@ -10,33 +10,57 @@ import (
 	"strings"
 )
 
-const defaultMaxNestingDepth = 20
+const (
+	defaultMaxNestingDepth = 20
+	defaultMaxExprLength   = 8192
+)
 
 // Config controls sanitizer behavior.
 type Config struct {
 	// MaxNestingDepth is the maximum brace nesting depth permitted.
 	// Zero means use the default (20).
 	MaxNestingDepth int
+
+	// MaxExprLength is the maximum byte length of an expression.
+	// Zero means use the default (8192). Defense-in-depth against
+	// oversized inputs that might exploit commands accepting arbitrary
+	// arguments (e.g. \phantom, \text).
+	MaxExprLength int
 }
 
 // Sanitizer validates LaTeX expressions against a static allowlist.
 type Sanitizer struct {
-	maxDepth int
+	cfg Config
 }
 
 // New creates a Sanitizer with the given configuration.
 func New(cfg Config) *Sanitizer {
-	depth := cfg.MaxNestingDepth
-	if depth <= 0 {
-		depth = defaultMaxNestingDepth
+	if cfg.MaxNestingDepth <= 0 {
+		cfg.MaxNestingDepth = defaultMaxNestingDepth
 	}
-	return &Sanitizer{maxDepth: depth}
+	if cfg.MaxExprLength <= 0 {
+		cfg.MaxExprLength = defaultMaxExprLength
+	}
+	return &Sanitizer{cfg: cfg}
 }
 
 // Check validates expr and returns nil if every command is on the allowlist
 // and the nesting depth is within budget. On rejection it returns an error
 // describing the first violation found.
 func (s *Sanitizer) Check(expr string) error {
+	if len(expr) > s.cfg.MaxExprLength {
+		return fmt.Errorf("expression length %d exceeds maximum %d", len(expr), s.cfg.MaxExprLength)
+	}
+
+	// Reject expressions containing control characters that could form
+	// terminal escape sequences if flushed as literal text.
+	for i := 0; i < len(expr); i++ {
+		b := expr[i]
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return fmt.Errorf("expression contains control character 0x%02x at position %d", b, i)
+		}
+	}
+
 	if err := s.checkNesting(expr); err != nil {
 		return err
 	}
@@ -50,8 +74,8 @@ func (s *Sanitizer) checkNesting(expr string) error {
 		switch expr[i] {
 		case '{':
 			depth++
-			if depth > s.maxDepth {
-				return fmt.Errorf("nesting depth %d exceeds maximum %d", depth, s.maxDepth)
+			if depth > s.cfg.MaxNestingDepth {
+				return fmt.Errorf("nesting depth %d exceeds maximum %d", depth, s.cfg.MaxNestingDepth)
 			}
 		case '}':
 			depth--
@@ -98,9 +122,11 @@ func (s *Sanitizer) checkCommands(expr string) error {
 		i = j
 
 		if cmd == "begin" || cmd == "end" {
-			if err := s.checkEnvironment(expr, cmd, i); err != nil {
+			next, err := s.checkEnvironment(expr, cmd, i)
+			if err != nil {
 				return err
 			}
+			i = next
 			continue
 		}
 
@@ -113,8 +139,10 @@ func (s *Sanitizer) checkCommands(expr string) error {
 
 // checkEnvironment extracts the environment name from \begin{name} or
 // \end{name} starting at pos (the position just after "begin" or "end")
-// and checks it against the allowed environments list.
-func (s *Sanitizer) checkEnvironment(expr, cmd string, pos int) error {
+// and checks it against the allowed environments list. It returns the
+// position after the closing '}' so the caller can advance past the
+// environment argument.
+func (s *Sanitizer) checkEnvironment(expr, cmd string, pos int) (int, error) {
 	// Skip optional whitespace between the command and the opening brace.
 	i := pos
 	n := len(expr)
@@ -125,21 +153,22 @@ func (s *Sanitizer) checkEnvironment(expr, cmd string, pos int) error {
 	if i >= n || expr[i] != '{' {
 		// \begin or \end without a brace-delimited argument.
 		// Treat the bare command as disallowed — it's not a valid use.
-		return fmt.Errorf("disallowed command: \\%s (missing environment name)", cmd)
+		return pos, fmt.Errorf("disallowed command: \\%s (missing environment name)", cmd)
 	}
 
 	// Find the closing brace.
 	open := i
 	close := strings.IndexByte(expr[open:], '}')
 	if close < 0 {
-		return fmt.Errorf("disallowed command: \\%s (unclosed environment name)", cmd)
+		return pos, fmt.Errorf("disallowed command: \\%s (unclosed environment name)", cmd)
 	}
 	envName := expr[open+1 : open+close]
 
 	if !allowedEnvironments[envName] {
-		return fmt.Errorf("disallowed environment: \\%s{%s}", cmd, envName)
+		return pos, fmt.Errorf("disallowed environment: \\%s{%s}", cmd, envName)
 	}
-	return nil
+	// Advance past the closing '}'.
+	return open + close + 1, nil
 }
 
 func isASCIILetter(c byte) bool {
