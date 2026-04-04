@@ -49,11 +49,20 @@ blocking defect.
    SIGWINCH updates PTY size and notifies renderer of new width. Works in both
    raw and cooked mode.
 
-8. **Terminal state restoration.** When the wrapper enters raw mode, it must
-   `defer` a restore of the original terminal state. Signal handlers for
-   SIGTERM, SIGINT, SIGHUP, and SIGQUIT must restore terminal state before
-   exiting. Panic recovery at the top of `main` must include terminal state
-   restore. SIGKILL and OOM are documented as unrecoverable.
+8. **Terminal state restoration.** The original terminal state is saved at the
+   top of `run()` (before any package touches the terminal) and restored via
+   four paths:
+   - `defer term.Restore(...)` in `run()` — normal exit and SIGTERM/SIGINT
+     (which are forwarded to the child; the child's exit causes `run()` to
+     return and the defer fires).
+   - `defer recover()` block in `run()` — panic in the main goroutine.
+   - SIGHUP/SIGQUIT signal handler goroutine — restores terminal and re-raises
+     the signal with the default handler so the process exits with the correct
+     signal status.
+   - `defer recover()` in each background goroutine — panics that would
+     otherwise leave the terminal in raw mode.
+   `session.RestoreTerminal()` is idempotent. SIGKILL and OOM are documented
+   as unrecoverable.
 
 **Security**
 
@@ -97,7 +106,7 @@ blocking defect.
 
 15. **Structured, leveled logging.** Uses `log/slog` or a thin wrapper. Writes
     to file (mode 0600), optionally tees to stderr. Never writes to stdout.
-    Level is runtime-configurable via `LATERM_LOG_LEVEL` env var or CLI flag.
+    Level is runtime-configurable via `LATERM_LOG_LEVEL` env var.
     Raw child-process content appears only at debug/trace level.
 
 16. **Runtime boundary validation.** Contract checks at PTY read/write, state
@@ -243,10 +252,10 @@ laterm/
 **`internal/logging/`**
 - Responsibility: Configure `log/slog` with structured output. Support file
   output (mode 0600) and optional stderr tee. Parse and apply log level from
-  env/flag. Provide package-level access to the configured logger.
+  env var. Provide package-level access to the configured logger.
 - Imports: stdlib only (`log/slog`, `os`, `io`).
 - Must NOT import: any other internal package.
-- Log file path configurable via `LATERM_LOG_FILE` env var or CLI flag.
+- Log file path configurable via `LATERM_LOG_FILE` env var.
   Default: no file (stderr only if enabled).
 
 ### Dependency Direction
