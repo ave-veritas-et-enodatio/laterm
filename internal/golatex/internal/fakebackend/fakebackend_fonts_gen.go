@@ -2,7 +2,7 @@
 
 package fakebackend
 
-import "github.com/benn-herrera/laterm/internal/golatex/font"
+import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 
 func init() {
 	fontsDb = dbFonts{

@@ -9,7 +9,7 @@ import (
 	"log"
 	"math"
 
-	"github.com/benn-herrera/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 )
 
 const (

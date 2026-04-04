@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // Package drawimg implements a canvas for img.
-package drawimg // import "github.com/benn-herrera/laterm/internal/golatex/drawtex/drawimg"
+package drawimg // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex/drawimg"
 
 import (
 	"fmt"
@@ -14,8 +14,8 @@ import (
 	"io"
 	"math"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
-	"github.com/benn-herrera/laterm/internal/golatex/mtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/mtex"
 	"git.sr.ht/~sbinet/gg"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"

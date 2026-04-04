@@ -7,8 +7,8 @@ package mtex
 import (
 	"strings"
 
-	"github.com/benn-herrera/laterm/internal/golatex/ast"
-	"github.com/benn-herrera/laterm/internal/golatex/tex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/ast"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/tex"
 )
 
 type handlerFunc func(p *parser, node ast.Node, state tex.State, math bool) tex.Node

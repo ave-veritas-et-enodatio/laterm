@@ -19,7 +19,7 @@ import (
 	creackpty "github.com/creack/pty"
 	"golang.org/x/term"
 
-	"github.com/benn-herrera/laterm/internal/logging"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/logging"
 )
 
 // Session represents an active PTY session with a child process.

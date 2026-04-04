@@ -13,7 +13,7 @@ A terminal wrapper that intercepts LaTeX math expressions from a child process a
 Install the binary directly with Go:
 
 ```sh
-go install github.com/benn-herrera/laterm/cmd/laterm@latest
+go install github.com/ave-veritas-et-enodatio/laterm/cmd/laterm@latest
 ```
 
 Then wrap any command:
@@ -77,7 +77,7 @@ Logs are never written to stdout. Raw child-process content is only logged at `d
 Requires Go 1.26 or later.
 
 ```sh
-git clone https://github.com/benn-herrera/laterm.git
+git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
 make build
 ```
@@ -104,6 +104,6 @@ The binary is written to `bin/laterm`. Additional make targets:
 | [`golang.org/x/term`](https://pkg.go.dev/golang.org/x/term) | Go Authors | BSD-3-Clause | Terminal raw mode, state save/restore, size queries |
 | [`golang.org/x/sys/unix`](https://pkg.go.dev/golang.org/x/sys) | Go Authors | BSD-3-Clause | Terminal pixel dimension queries (TIOCGWINSZ) |
 | [`github.com/mattn/go-sixel`](https://github.com/mattn/go-sixel) | Yasuhiro Matsumoto (mattn) | MIT | Sixel encoding from Go images |
-| [`codeberg.org/go-latex/latex`](https://codeberg.org/go-latex/latex) v0.2.0 (vendored) | Sebastien Binet (sbinet) | BSD-3-Clause | LaTeX parsing and rendering to image; source vendored at `internal/golatex/` with in-repo fixes |
+| [`codeberg.org/go-latex/latex`](https://codeberg.org/go-latex/latex) v0.2.0 (inlined) | Sebastien Binet (sbinet) | BSD-3-Clause | LaTeX parsing and rendering to image; source vendored at `internal/golatex/` with in-repo fixes |
 | [`codeberg.org/go-fonts/*`](https://codeberg.org/go-fonts) | go-latex contributors | OFL-1.1 | Font data consumed by the vendored go-latex font backend |
 | [`golang.org/x/image`](https://pkg.go.dev/golang.org/x/image) | Go Authors | BSD-3-Clause | Image primitives used by the vendored go-latex rendering pipeline |

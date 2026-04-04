@@ -12,7 +12,7 @@ LaTerm is a Go PTY wrapper that intercepts LaTeX math expressions from child
 process output and renders them as Sixel graphics or Unicode text. Every byte
 that is not part of a recognized math expression passes through unmodified.
 
-Module path: `github.com/benn-herrera/laterm`
+Module path: `github.com/ave-veritas-et-enodatio/laterm`
 
 ---
 
@@ -338,7 +338,7 @@ extend the sanitizer, preserve this contract.
 
 go-latex v0.2.0 source is copied into `internal/golatex/` with import paths
 rewritten from `codeberg.org/go-latex/latex/...` to
-`github.com/benn-herrera/laterm/internal/golatex/...`. All fixes are made
+`github.com/ave-veritas-et-enodatio/laterm/internal/golatex/...`. All fixes are made
 in-repo; the external module is not used.
 
 ### Dual macro registry

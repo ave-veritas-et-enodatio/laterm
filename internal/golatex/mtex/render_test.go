@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
 )
 
 type dummyRenderer struct{}

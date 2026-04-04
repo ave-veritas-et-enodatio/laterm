@@ -259,7 +259,7 @@ laterm/
   Wrap all `internal/golatex` and `go-sixel` calls in `recover()`. On any
   failure (timeout, panic, oversized, error) return an error so the caller can
   fall back.
-- Imports: `github.com/benn-herrera/laterm/internal/golatex/...`,
+- Imports: `github.com/ave-veritas-et-enodatio/laterm/internal/golatex/...`,
   `github.com/mattn/go-sixel`, `logging`.
 - Must NOT import: `pty`, `stream`, `statemachine`, `sanitize`, `unicode/`.
 - Timeout: the entire Render call runs in a goroutine; the caller selects

@@ -3,10 +3,10 @@
 // license that can be found in the LICENSE file.
 
 // Package drawtex describes the graphics interface for drawing LaTeX.
-package drawtex // import "github.com/benn-herrera/laterm/internal/golatex/drawtex"
+package drawtex // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
 
 import (
-	"github.com/benn-herrera/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 	"golang.org/x/image/font/sfnt"
 )
 

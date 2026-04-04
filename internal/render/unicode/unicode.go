@@ -13,7 +13,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/benn-herrera/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
 )
 
 // Renderer converts LaTeX expressions to Unicode text.

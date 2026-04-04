@@ -3,16 +3,16 @@
 // license that can be found in the LICENSE file.
 
 // Package ttf provides a truetype font Backend
-package ttf // import "github.com/benn-herrera/laterm/internal/golatex/font/ttf"
+package ttf // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font/ttf"
 
 import (
 	"errors"
 	"fmt"
 	"unicode"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
-	"github.com/benn-herrera/laterm/internal/golatex/font"
-	"github.com/benn-herrera/laterm/internal/golatex/internal/tex2unicode"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/tex2unicode"
 	stdfont "golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/gobolditalic"

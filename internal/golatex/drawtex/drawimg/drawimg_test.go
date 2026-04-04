@@ -23,9 +23,9 @@ import (
 	"codeberg.org/go-fonts/stix/stix2textbolditalic"
 	"codeberg.org/go-fonts/stix/stix2textitalic"
 	"codeberg.org/go-fonts/stix/stix2textregular"
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex/drawimg"
-	"github.com/benn-herrera/laterm/internal/golatex/font/ttf"
-	"github.com/benn-herrera/laterm/internal/golatex/mtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex/drawimg"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font/ttf"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/mtex"
 	"golang.org/x/image/font/sfnt"
 )
 

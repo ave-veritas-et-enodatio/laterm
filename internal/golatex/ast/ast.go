@@ -4,13 +4,13 @@
 
 // Package ast declares the types used to represent syntax trees for
 // LaTeX documents.
-package ast // import "github.com/benn-herrera/laterm/internal/golatex/ast"
+package ast // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/ast"
 
 import (
 	"fmt"
 	"io"
 
-	"github.com/benn-herrera/laterm/internal/golatex/token"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/token"
 )
 
 // Node is a node in a LaTeX document.

@@ -13,7 +13,7 @@ with an in-repo copy that could be patched directly.
 
 go-latex v0.2.0 source (42 Go files) was copied into `internal/golatex/`. All
 import paths were rewritten from `codeberg.org/go-latex/latex/...` to
-`github.com/benn-herrera/laterm/internal/golatex/...`. The external module entry
+`github.com/ave-veritas-et-enodatio/laterm/internal/golatex/...`. The external module entry
 was removed from `go.mod`. The font dependencies (`codeberg.org/go-fonts/*`,
 `golang.org/x/image`) remain as external deps — they are consumed by the
 vendored font backend and cannot be inlined.

@@ -3,14 +3,14 @@
 // license that can be found in the LICENSE file.
 
 // Package fakebackend provides a fake tex Backend for testing purposes.
-package fakebackend // import "github.com/benn-herrera/laterm/internal/golatex/internal/fakebackend"
+package fakebackend // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/fakebackend"
 
 //go:generate go run ./gen-fakebackend.go
 
 import (
 	"fmt"
 
-	"github.com/benn-herrera/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 )
 
 type dbXHs map[xhKey]float64

@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
-	"github.com/benn-herrera/laterm/internal/golatex/font/ttf"
-	"github.com/benn-herrera/laterm/internal/golatex/tex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font/ttf"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/tex"
 )
 
 type Renderer interface {

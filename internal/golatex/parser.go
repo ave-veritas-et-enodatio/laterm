@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package latex // import "github.com/benn-herrera/laterm/internal/golatex"
+package latex // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex"
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/benn-herrera/laterm/internal/golatex/ast"
-	"github.com/benn-herrera/laterm/internal/golatex/token"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/ast"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/token"
 )
 
 // ParseExpr parses a simple LaTeX expression.

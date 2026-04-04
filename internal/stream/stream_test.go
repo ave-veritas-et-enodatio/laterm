@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benn-herrera/laterm/internal/render"
-	"github.com/benn-herrera/laterm/internal/sanitize"
-	"github.com/benn-herrera/laterm/internal/statemachine"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/sanitize"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/statemachine"
 )
 
 // slowReader wraps a reader and adds a delay between reads. This helps test

@@ -20,15 +20,15 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/benn-herrera/laterm/internal/logging"
-	"github.com/benn-herrera/laterm/internal/pty"
-	"github.com/benn-herrera/laterm/internal/render"
-	"github.com/benn-herrera/laterm/internal/render/sixel"
-	"github.com/benn-herrera/laterm/internal/render/unicode"
-	"github.com/benn-herrera/laterm/internal/sanitize"
-	"github.com/benn-herrera/laterm/internal/statemachine"
-	"github.com/benn-herrera/laterm/internal/stream"
-	"github.com/benn-herrera/laterm/internal/termcap"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/logging"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/pty"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render/sixel"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render/unicode"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/sanitize"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/statemachine"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/stream"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/termcap"
 )
 
 const usage = `Usage: laterm <command> [args...]

@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/benn-herrera/laterm/internal/render"
-	"github.com/benn-herrera/laterm/internal/sanitize"
-	"github.com/benn-herrera/laterm/internal/statemachine"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/sanitize"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/statemachine"
 )
 
 const (

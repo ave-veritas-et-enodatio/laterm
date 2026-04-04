@@ -7,8 +7,8 @@ package mtex
 import (
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
-	"github.com/benn-herrera/laterm/internal/golatex/font/ttf"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font/ttf"
 )
 
 // fixedExpr describes a LaTeX expression that previously caused a panic. The

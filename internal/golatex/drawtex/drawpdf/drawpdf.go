@@ -3,12 +3,12 @@
 // license that can be found in the LICENSE file.
 
 // Package drawpdf implements a canvas for PDF.
-package drawpdf // import "github.com/benn-herrera/laterm/internal/golatex/drawtex/drawpdf"
+package drawpdf // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex/drawpdf"
 
 import (
 	"log"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex"
 	pdf "codeberg.org/go-pdf/fpdf"
 )
 

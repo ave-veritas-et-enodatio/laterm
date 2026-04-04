@@ -10,8 +10,8 @@ import (
 
 	"codeberg.org/go-fonts/dejavu/dejavusans"
 	"codeberg.org/go-fonts/dejavu/dejavusansoblique"
-	"github.com/benn-herrera/laterm/internal/golatex/font"
-	"github.com/benn-herrera/laterm/internal/golatex/internal/fakebackend"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/fakebackend"
 	"golang.org/x/image/font/sfnt"
 )
 

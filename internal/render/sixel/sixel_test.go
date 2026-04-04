@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/benn-herrera/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
 )
 
 func TestNew_Defaults(t *testing.T) {

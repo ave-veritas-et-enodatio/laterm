@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/golatex/token"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/token"
 )
 
 func TestPrint(t *testing.T) {

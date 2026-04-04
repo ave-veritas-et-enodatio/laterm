@@ -7,7 +7,7 @@ package fakebackend
 import (
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 )
 
 func TestBackend(t *testing.T) {

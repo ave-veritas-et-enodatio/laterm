@@ -1,4 +1,4 @@
-module github.com/benn-herrera/laterm
+module github.com/ave-veritas-et-enodatio/laterm
 
 go 1.26.1
 

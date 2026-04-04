@@ -5,7 +5,7 @@
 package tex
 
 import (
-	"github.com/benn-herrera/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
 )
 
 type State struct {

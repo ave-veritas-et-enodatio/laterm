@@ -27,4 +27,4 @@
 // book, e.g., node123
 //
 // Note that (as TeX) y increases downward.
-package tex // import "github.com/benn-herrera/laterm/internal/golatex/tex"
+package tex // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/tex"

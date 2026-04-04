@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/benn-herrera/laterm/internal/logging"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/logging"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )

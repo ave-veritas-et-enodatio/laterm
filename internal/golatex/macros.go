@@ -7,9 +7,9 @@ package latex
 import (
 	"strings"
 
-	"github.com/benn-herrera/laterm/internal/golatex/ast"
-	"github.com/benn-herrera/laterm/internal/golatex/internal/tex2unicode"
-	"github.com/benn-herrera/laterm/internal/golatex/token"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/ast"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/tex2unicode"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/token"
 )
 
 type macroParser interface {

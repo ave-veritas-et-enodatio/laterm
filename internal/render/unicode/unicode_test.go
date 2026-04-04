@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
 )
 
 func TestRender_GreekLetters(t *testing.T) {

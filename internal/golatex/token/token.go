@@ -4,7 +4,7 @@
 
 // Package token defines constants representing the lexical tokens of
 // LaTeX documents.
-package token // import "github.com/benn-herrera/laterm/internal/golatex/token"
+package token // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/token"
 
 //go:generate stringer -type Kind
 

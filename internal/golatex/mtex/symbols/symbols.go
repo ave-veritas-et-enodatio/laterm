@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // Package symbols contains logic about TeX symbols.
-package symbols // import "github.com/benn-herrera/laterm/internal/golatex/mtex/symbols"
+package symbols // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/mtex/symbols"
 
 //go:generate go run ./gen-symbols.go
 

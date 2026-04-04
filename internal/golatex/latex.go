@@ -3,4 +3,4 @@
 // license that can be found in the LICENSE file.
 
 // Package latex provides types and functions to work with LaTeX.
-package latex // import "github.com/benn-herrera/laterm/internal/golatex"
+package latex // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex"

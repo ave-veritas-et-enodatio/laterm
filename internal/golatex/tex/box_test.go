@@ -8,8 +8,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/benn-herrera/laterm/internal/golatex/font"
-	"github.com/benn-herrera/laterm/internal/golatex/internal/fakebackend"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/fakebackend"
 )
 
 func TestBox(t *testing.T) {

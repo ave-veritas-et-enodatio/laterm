@@ -15,12 +15,12 @@ import (
 	"image/png"
 	"log/slog"
 
-	"github.com/benn-herrera/laterm/internal/golatex/drawtex/drawimg"
-	"github.com/benn-herrera/laterm/internal/golatex/mtex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/drawtex/drawimg"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/mtex"
 	sixelenc "github.com/mattn/go-sixel"
 
-	"github.com/benn-herrera/laterm/internal/logging"
-	"github.com/benn-herrera/laterm/internal/render"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/logging"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/render"
 )
 
 // Sentinel errors.

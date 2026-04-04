@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/benn-herrera/laterm/internal/golatex"
-	"github.com/benn-herrera/laterm/internal/golatex/ast"
-	"github.com/benn-herrera/laterm/internal/golatex/font"
-	"github.com/benn-herrera/laterm/internal/golatex/internal/tex2unicode"
-	"github.com/benn-herrera/laterm/internal/golatex/mtex/symbols"
-	"github.com/benn-herrera/laterm/internal/golatex/tex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/ast"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/font"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/tex2unicode"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/mtex/symbols"
+	"github.com/ave-veritas-et-enodatio/laterm/internal/golatex/tex"
 )
 
 // Parse parses a LaTeX math expression and returns the TeX-like box model

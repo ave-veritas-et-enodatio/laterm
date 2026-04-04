@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // Package tex2unicode provides tools for associating TeX symbols to UTF-8.
-package tex2unicode // import "github.com/benn-herrera/laterm/internal/golatex/internal/tex2unicode"
+package tex2unicode // import "github.com/ave-veritas-et-enodatio/laterm/internal/golatex/internal/tex2unicode"
 
 import (
 	"fmt"
