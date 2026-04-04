@@ -32,6 +32,12 @@ const (
 	// If the next byte is '$', the block expression is complete. Otherwise
 	// the '$' is part of the math content.
 	StateBlockMathClosing
+
+	// StatePotentialUpperMath indicates '$' followed by an uppercase letter
+	// was seen. The machine needs one more byte to disambiguate between a
+	// shell variable ($PATH, $HOME) and inline math ($A$, $H_\infty$).
+	// The uppercase letter is buffered; the next byte decides.
+	StatePotentialUpperMath
 )
 
 // escapeType identifies which kind of ANSI escape sequence the machine is
@@ -103,7 +109,7 @@ func (m *Machine) TimeBudgetExpired() Action {
 	switch m.state {
 	case StateInlineMath, StateBlockMath, StateBlockMathClosing:
 		return m.flushAndReset()
-	case StatePotentialMath:
+	case StatePotentialMath, StatePotentialUpperMath:
 		return m.flushAndReset()
 	default:
 		return none()
@@ -128,6 +134,8 @@ func (m *Machine) Feed(b byte) Action {
 		return m.feedBlockMath(b)
 	case StateBlockMathClosing:
 		return m.feedBlockMathClosing(b)
+	case StatePotentialUpperMath:
+		return m.feedPotentialUpperMath(b)
 	default:
 		// Unknown state — defensive reset. Should never happen in correct code.
 		m.Reset()
@@ -247,17 +255,13 @@ func (m *Machine) feedEscapeSeq(b byte) Action {
 // happen.
 func (m *Machine) feedPotentialMath(b byte) Action {
 	switch {
-	// Shell variable: $A-$Z (uppercase letter).
-	//
-	// Lowercase after $ is ambiguous between shell variables ($var) and
-	// single-letter math variables ($x$, $n$). We reject only uppercase
-	// because: (1) uppercase shell vars ($PATH, $HOME) are the dominant
-	// false positive source, and (2) single-letter lowercase math like
-	// $x$ is the primary LaTeX use case. Lowercase shell variables ($path
-	// in zsh) will be caught by the time budget (200ms) and flushed as
-	// literal.
+	// Uppercase letter after $: ambiguous between shell variable ($PATH,
+	// $HOME) and math ($A$, $H_\infty$, $S_{11}$). We need one more byte
+	// to decide, so transition to a lookahead state.
 	case b >= 'A' && b <= 'Z':
-		return m.rejectAsShellVar(b)
+		m.state = StatePotentialUpperMath
+		m.buf = append(m.buf, b) // buf is now "$X"
+		return none()
 
 	// Subshell: $(
 	case b == '(':
@@ -356,6 +360,48 @@ func (m *Machine) feedBlockMathClosing(b byte) Action {
 	return bufferForMath()
 }
 
+// feedPotentialUpperMath handles the third byte after "$X" where X is an
+// uppercase letter. This is the lookahead that disambiguates shell variables
+// from math expressions.
+func (m *Machine) feedPotentialUpperMath(b byte) Action {
+	switch {
+	// Another letter (a-z, A-Z) → looks like a shell variable ($PATH, $HOME).
+	case (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'):
+		return m.rejectAsShellVar(b)
+
+	// Math-plausible characters: operators, sub/superscript, braces,
+	// closing $, digits, space, etc. Transition to inline math.
+	case b == '_', b == '^', b == '\\',
+		b == '{', b == '}',
+		b == '+', b == '-', b == '=',
+		b == '(', b == ')', b == '<', b == '>',
+		b == '~', b == '!', b == '.', b == ',',
+		b == '|',
+		b == ' ',
+		b >= '0' && b <= '9':
+		m.state = StateInlineMath
+		m.buf = append(m.buf, b)
+		// byteCount covers content bytes (everything after the leading '$').
+		// The uppercase letter was 1 byte, plus this byte is 2.
+		m.byteCount = 2
+		return bufferForMath()
+
+	case b == '$':
+		// Closing $: the expression is "$X$" — complete inline math.
+		// Content is everything after the leading '$', which is just the
+		// uppercase letter.
+		content := string(m.buf[1:])
+		m.buf = m.buf[:0]
+		m.byteCount = 0
+		m.state = StateText
+		return mathComplete(content, false)
+
+	default:
+		// Unrecognized (control chars, other punctuation) → flush as literal.
+		return m.rejectAsLiteral(b)
+	}
+}
+
 // rejectAsShellVar flushes the buffered '$' as literal text, emits b, and
 // returns to TEXT state. Used when the byte after '$' indicates a shell
 // variable pattern.
@@ -402,6 +448,8 @@ func isInlineMathStart(b byte) bool {
 	case b == '\\': // \command
 		return true
 	case b >= 'a' && b <= 'z': // variable name
+		return true
+	case b >= 'A' && b <= 'Z': // uppercase variable (routed via StatePotentialUpperMath)
 		return true
 	case b >= '0' && b <= '9': // digit
 		return true

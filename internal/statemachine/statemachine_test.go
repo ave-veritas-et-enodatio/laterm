@@ -124,7 +124,6 @@ func TestShellVariableRejection(t *testing.T) {
 		{"HOME", "$HOME"},
 		{"subshell", "$(cmd)"},
 		{"expansion", "${var}"},
-		{"single_uppercase", "$X"},
 	}
 
 	for _, tt := range tests {
@@ -153,6 +152,133 @@ func TestShellVariableRejection(t *testing.T) {
 			assertState(t, m, StateText)
 		})
 	}
+}
+
+func TestUppercaseMathDetection(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		content string
+	}{
+		{"H_infty", `$H_\infty$`, `H_\infty`},
+		{"S_subscript_braces", `$S_{11}$`, `S_{11}`},
+		{"single_A", `$A$`, `A`},
+		{"N_space_command", `$N \to \infty$`, `N \to \infty`},
+		{"A_plus_B", `$A + B$`, `A + B`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(Config{})
+			actions := feedAll(m, []byte(tt.input))
+
+			var found bool
+			for _, a := range actions {
+				if a.Kind == ActionMathComplete {
+					found = true
+					if a.IsBlock {
+						t.Error("expected inline math, got block")
+					}
+					if a.Content != tt.content {
+						t.Errorf("content = %q, want %q", a.Content, tt.content)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("no ActionMathComplete for input %q", tt.input)
+			}
+			assertState(t, m, StateText)
+		})
+	}
+}
+
+func TestUppercaseShellVariableRejection(t *testing.T) {
+	// Multi-letter uppercase sequences after $ are still rejected as shell vars.
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"PATH", "$PATH"},
+		{"HOME", "$HOME/dir"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(Config{})
+			actions := feedAll(m, []byte(tt.input))
+
+			var gotFlush bool
+			for _, a := range actions {
+				if a.Kind == ActionFlushLiteral {
+					gotFlush = true
+					if len(a.Data) == 0 || a.Data[0] != '$' {
+						t.Errorf("flush data = %q, expected to start with '$'", a.Data)
+					}
+				}
+				if a.Kind == ActionMathComplete {
+					t.Error("shell variable should not produce ActionMathComplete")
+				}
+			}
+			if !gotFlush {
+				t.Error("expected ActionFlushLiteral for shell variable pattern")
+			}
+			assertState(t, m, StateText)
+		})
+	}
+}
+
+func TestUppercaseFlushOnTimeout(t *testing.T) {
+	// $X followed by end-of-input (timeout) should flush "$X" as literal.
+	m := New(Config{})
+	m.Feed('$')
+	m.Feed('X')
+	assertState(t, m, StatePotentialUpperMath)
+
+	a := m.TimeBudgetExpired()
+	if a.Kind != ActionFlushLiteral {
+		t.Errorf("Kind = %d, want ActionFlushLiteral (%d)", a.Kind, ActionFlushLiteral)
+	}
+	if string(a.Data) != "$X" {
+		t.Errorf("data = %q, want %q", a.Data, "$X")
+	}
+	assertState(t, m, StateText)
+}
+
+func TestUppercaseStateTransition(t *testing.T) {
+	// Verify the state transitions for uppercase-after-dollar.
+	m := New(Config{})
+
+	assertState(t, m, StateText)
+	m.Feed('$')
+	assertState(t, m, StatePotentialMath)
+	m.Feed('H')
+	assertState(t, m, StatePotentialUpperMath)
+	// '_' is a math character → transitions to InlineMath.
+	a := m.Feed('_')
+	if a.Kind != ActionBufferForMath {
+		t.Errorf("Kind = %d, want ActionBufferForMath", a.Kind)
+	}
+	assertState(t, m, StateInlineMath)
+}
+
+func TestUppercaseRejectOnControlChar(t *testing.T) {
+	// $X followed by a control character → flush as literal.
+	m := New(Config{})
+	actions := feedAll(m, []byte("$X\t"))
+
+	var gotFlush bool
+	for _, a := range actions {
+		if a.Kind == ActionFlushLiteral {
+			gotFlush = true
+			if string(a.Data) != "$X\t" {
+				t.Errorf("flush data = %q, want %q", a.Data, "$X\t")
+			}
+		}
+	}
+	if !gotFlush {
+		t.Error("expected ActionFlushLiteral for $X + control char")
+	}
+	assertState(t, m, StateText)
 }
 
 func TestInlineByteBudgetExceeded(t *testing.T) {
@@ -480,6 +606,7 @@ func TestReset(t *testing.T) {
 		{"from_inline_math", func(m *Machine) { m.Feed('$'); m.Feed('x') }},
 		{"from_block_math", func(m *Machine) { m.Feed('$'); m.Feed('$'); m.Feed('x') }},
 		{"from_potential_math", func(m *Machine) { m.Feed('$') }},
+		{"from_potential_upper_math", func(m *Machine) { m.Feed('$'); m.Feed('A') }},
 		{"from_escape", func(m *Machine) { m.Feed(0x1B) }},
 		{"from_escape_seq", func(m *Machine) { m.Feed(0x1B); m.Feed('[') }},
 		{"from_block_math_closing", func(m *Machine) { m.Feed('$'); m.Feed('$'); m.Feed('x'); m.Feed('$') }},
@@ -963,7 +1090,7 @@ func TestFeedTableDriven(t *testing.T) {
 		{
 			name:      "shell_var",
 			input:     []byte("$HOME"),
-			wantKinds: []ActionKind{ActionFlushLiteral, ActionEmit, ActionEmit, ActionEmit},
+			wantKinds: []ActionKind{ActionFlushLiteral, ActionEmit, ActionEmit},
 			wantState: StateText,
 		},
 		{
@@ -1133,6 +1260,11 @@ func FuzzFeed(f *testing.F) {
 	f.Add([]byte("$$"))
 	f.Add([]byte("$"))
 	f.Add([]byte{})
+	f.Add([]byte(`$H_\infty$`))
+	f.Add([]byte(`$A$`))
+	f.Add([]byte(`$S_{11}$`))
+	f.Add([]byte("$N \\to \\infty$"))
+	f.Add([]byte("$X"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		m := New(Config{InlineByteBudget: 64, BlockByteBudget: 256})
@@ -1156,7 +1288,8 @@ func FuzzFeed(f *testing.F) {
 			// Invariant: state is always a known value.
 			switch m.State() {
 			case StateText, StateEscape, StateEscapeSeq, StatePotentialMath,
-				StateInlineMath, StateBlockMath, StateBlockMathClosing:
+				StateInlineMath, StateBlockMath, StateBlockMathClosing,
+				StatePotentialUpperMath:
 				// OK.
 			default:
 				t.Fatalf("unknown State: %d", m.State())
