@@ -5,10 +5,7 @@
 // The sanitizer is stdlib-only and does not import any rendering package.
 package sanitize
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 const (
 	defaultMaxNestingDepth = 20
@@ -91,9 +88,11 @@ func (s *Sanitizer) checkNesting(expr string) error {
 }
 
 // checkCommands scans for backslash-letter sequences and validates each
-// against the allowlist. \begin{env} and \end{env} are handled specially:
-// the command itself ("begin"/"end") is always allowed, and the environment
-// name is checked against allowedEnvironments.
+// against the allowlist.
+//
+// NOTE: \begin/\end environment handling has been removed because the
+// go-latex parser panics on \begin (parser.go:143). Re-enable when the
+// parser gains environment support.
 func (s *Sanitizer) checkCommands(expr string) error {
 	i := 0
 	n := len(expr)
@@ -121,54 +120,11 @@ func (s *Sanitizer) checkCommands(expr string) error {
 		cmd := expr[start:j]
 		i = j
 
-		if cmd == "begin" || cmd == "end" {
-			next, err := s.checkEnvironment(expr, cmd, i)
-			if err != nil {
-				return err
-			}
-			i = next
-			continue
-		}
-
 		if !allowedCommands[cmd] {
 			return fmt.Errorf("disallowed command: \\%s", cmd)
 		}
 	}
 	return nil
-}
-
-// checkEnvironment extracts the environment name from \begin{name} or
-// \end{name} starting at pos (the position just after "begin" or "end")
-// and checks it against the allowed environments list. It returns the
-// position after the closing '}' so the caller can advance past the
-// environment argument.
-func (s *Sanitizer) checkEnvironment(expr, cmd string, pos int) (int, error) {
-	// Skip optional whitespace between the command and the opening brace.
-	i := pos
-	n := len(expr)
-	for i < n && (expr[i] == ' ' || expr[i] == '\t') {
-		i++
-	}
-
-	if i >= n || expr[i] != '{' {
-		// \begin or \end without a brace-delimited argument.
-		// Treat the bare command as disallowed — it's not a valid use.
-		return pos, fmt.Errorf("disallowed command: \\%s (missing environment name)", cmd)
-	}
-
-	// Find the closing brace.
-	open := i
-	close := strings.IndexByte(expr[open:], '}')
-	if close < 0 {
-		return pos, fmt.Errorf("disallowed command: \\%s (unclosed environment name)", cmd)
-	}
-	envName := expr[open+1 : open+close]
-
-	if !allowedEnvironments[envName] {
-		return pos, fmt.Errorf("disallowed environment: \\%s{%s}", cmd, envName)
-	}
-	// Advance past the closing '}'.
-	return open + close + 1, nil
 }
 
 func isASCIILetter(c byte) bool {

@@ -18,30 +18,52 @@ func TestCheck_AllowedExpressions(t *testing.T) {
 		{name: "greek letters", expr: `\alpha + \beta = \gamma`},
 		{name: "uppercase greek", expr: `\Gamma \Delta \Omega`},
 		{name: "frac", expr: `\frac{\alpha}{\beta}`},
+		{name: "dfrac", expr: `\dfrac{1}{2}`},
+		{name: "tfrac", expr: `\tfrac{a}{b}`},
 		{name: "sqrt", expr: `\sqrt{x^2 + y^2}`},
 		{name: "sum with limits", expr: `\sum_{i=0}^{n} x_i`},
 		{name: "integral", expr: `\int_0^1 f(x) dx`},
 		{name: "trig functions", expr: `\sin(\theta) + \cos(\theta)`},
+		{name: "additional functions", expr: `\coth x + \lg y + \Pr(A)`},
 		{name: "relations", expr: `a \leq b \geq c \neq d`},
 		{name: "arrows", expr: `A \rightarrow B \Rightarrow C`},
+		{name: "to arrow", expr: `f \to g`},
 		{name: "delimiters", expr: `\left( \frac{a}{b} \right)`},
 		{name: "accents", expr: `\hat{x} + \bar{y} + \vec{z}`},
+		{name: "new accents", expr: `\breve{a} \acute{e} \grave{u} \check{c}`},
+		{name: "wide accents", expr: `\widehat{AB} \widetilde{CD}`},
 		{name: "font commands", expr: `\mathbb{R} \mathcal{L} \mathrm{d}x`},
+		{name: "extended math fonts", expr: `\mathscr{L} \mathdefault{x} \mathregular{y}`},
 		{name: "text command", expr: `\text{for all } x`},
+		{name: "text font commands", expr: `\textbf{bold} \textit{italic} \textsf{sans}`},
+		{name: "extended text fonts", expr: `\textcal{c} \textdefault{d} \textbb{b} \textfrak{f} \textscr{s} \textregular{r} \texttt{t}`},
+		{name: "short font names", expr: `\rm x \bf y \it z \tt w`},
+		{name: "style switches", expr: `\displaystyle \frac{a}{b}`},
 		{name: "spacing", expr: `a \quad b \qquad c`},
 		{name: "misc symbols", expr: `\infty \partial \nabla`},
+		{name: "more symbols", expr: `\hbar \ell \Re \Im \wp \aleph \beth`},
 		{name: "dots", expr: `a_1, \ldots, a_n`},
-		{name: "environments", expr: `\begin{matrix} a & b \\ c & d \end{matrix}`},
-		{name: "cases environment", expr: `\begin{cases} x & y \\ z & w \end{cases}`},
-		{name: "structural", expr: `\binom{n}{k} \overset{?}{=}`},
+		{name: "structural", expr: `\binom{n}{k} \stackrel{?}{=}`},
 		{name: "binary ops", expr: `a \pm b \times c \cdot d`},
-		{name: "color and cancel", expr: `\color{red} \cancel{x}`},
+		{name: "color", expr: `\color{red} x`},
 		{name: "non-letter backslash escapes", expr: `\, \; \! \\ \{ \}`},
 		{name: "empty expression", expr: ""},
 		{name: "operatorname", expr: `\operatorname{tr}(A)`},
 		{name: "boldsymbol", expr: `\boldsymbol{\theta}`},
-		{name: "all environments", expr: `\begin{pmatrix} 1 \end{pmatrix} \begin{bmatrix} 2 \end{bmatrix} \begin{Bmatrix} 3 \end{Bmatrix} \begin{vmatrix} 4 \end{vmatrix} \begin{Vmatrix} 5 \end{Vmatrix} \begin{aligned} 6 \end{aligned} \begin{gathered} 7 \end{gathered} \begin{array} 8 \end{array} \begin{subarray} 9 \end{subarray} \begin{split} 10 \end{split}`},
 		{name: "backslash at end", expr: `foo\`},
+		{name: "phantom", expr: `\phantom{x}`},
+		{name: "over under braces", expr: `\underbrace{a+b} \overbrace{c+d}`},
+		{name: "negation", expr: `\not\equiv`},
+		{name: "overline", expr: `\overline{AB}`},
+		{name: "overleftarrow", expr: `\overleftarrow{AB}`},
+		{name: "tex2unicode integrals", expr: `\iint \iiint`},
+		{name: "quantifiers", expr: `\forall x \exists y \nexists z`},
+		{name: "notin", expr: `x \notin S`},
+		{name: "card symbols", expr: `\clubsuit \diamondsuit \heartsuit \spadesuit`},
+		{name: "music symbols", expr: `\flat \natural \sharp`},
+		{name: "hspace", expr: `\hspace{1em}`},
+		{name: "variant greek", expr: `\varepsilon \vartheta \varpi \varrho \varsigma \varphi`},
+		{name: "emptyset variants", expr: `\emptyset \varnothing`},
 	}
 
 	for _, tt := range tests {
@@ -77,11 +99,28 @@ func TestCheck_DisallowedCommands(t *testing.T) {
 			expr:    `\frac{\alpha}{\input{x}}`,
 			wantSub: `\input`,
 		},
+		// \begin/\end are disallowed because the parser panics on them.
 		{
-			name:    "disallowed environment",
-			expr:    `\begin{document} text \end{document}`,
-			wantSub: `\begin{document}`,
+			name:    "begin disallowed",
+			expr:    `\begin{matrix} a \end{matrix}`,
+			wantSub: `\begin`,
 		},
+		{
+			name:    "end disallowed",
+			expr:    `\end{cases}`,
+			wantSub: `\end`,
+		},
+		// Commands removed from allowlist: no parser/handler support.
+		{name: "implies removed", expr: `A \implies B`, wantSub: `\implies`},
+		{name: "iff removed", expr: `A \iff B`, wantSub: `\iff`},
+		{name: "cancel removed", expr: `\cancel{x}`, wantSub: `\cancel`},
+		{name: "boxed removed", expr: `\boxed{E=mc^2}`, wantSub: `\boxed`},
+		{name: "big removed", expr: `\big(`, wantSub: `\big`},
+		{name: "underline removed", expr: `\underline{x}`, wantSub: `\underline`},
+		{name: "overset removed", expr: `\overset{a}{b}`, wantSub: `\overset`},
+		{name: "underset removed", expr: `\underset{a}{b}`, wantSub: `\underset`},
+		{name: "smash removed", expr: `\smash{x}`, wantSub: `\smash`},
+		{name: "pmod removed", expr: `\pmod{n}`, wantSub: `\pmod`},
 	}
 
 	for _, tt := range tests {
@@ -158,58 +197,6 @@ func TestCheck_NestingDepth(t *testing.T) {
 			}
 			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "nesting depth") {
 				t.Errorf("Check() error = %q, want error about nesting depth", err.Error())
-			}
-		})
-	}
-}
-
-func TestCheck_EnvironmentEdgeCases(t *testing.T) {
-	t.Parallel()
-	s := New(Config{})
-
-	tests := []struct {
-		name    string
-		expr    string
-		wantErr bool
-		wantSub string
-	}{
-		{
-			name:    "begin without brace",
-			expr:    `\begin matrix`,
-			wantErr: true,
-			wantSub: "missing environment name",
-		},
-		{
-			name:    "begin with unclosed brace",
-			expr:    `\begin{matrix`,
-			wantErr: true,
-			wantSub: "unclosed environment name",
-		},
-		{
-			name:    "end without brace",
-			expr:    `\end`,
-			wantErr: true,
-			wantSub: "missing environment name",
-		},
-		{
-			name:    "begin with whitespace before brace",
-			expr:    `\begin {matrix} x \end{matrix}`,
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := s.Check(tt.expr)
-			if tt.wantErr && err == nil {
-				t.Fatalf("Check(%q) = nil, want error", tt.expr)
-			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("Check(%q) = %v, want nil", tt.expr, err)
-			}
-			if tt.wantErr && err != nil && tt.wantSub != "" && !strings.Contains(err.Error(), tt.wantSub) {
-				t.Errorf("Check(%q) error = %q, want substring %q", tt.expr, err.Error(), tt.wantSub)
 			}
 		})
 	}
@@ -309,11 +296,11 @@ func TestCheck_ExpressionLength(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		maxLen    int
-		exprLen   int
-		wantErr   bool
-		wantSub   string
+		name    string
+		maxLen  int
+		exprLen int
+		wantErr bool
+		wantSub string
 	}{
 		{
 			name:    "exceeds default limit",

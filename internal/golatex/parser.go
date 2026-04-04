@@ -25,9 +25,16 @@ const (
 	mathState
 )
 
+// maxParseDepth limits recursion in the recursive-descent parser.
+// 100 is far above any legitimate LaTeX expression depth and far
+// below the Go stack overflow threshold.
+const maxParseDepth = 100
+
 type parser struct {
 	s     *texScanner
 	state state
+	depth int
+	err   error // first fatal parse error; stops further recursion
 
 	macros map[string]macroParser
 }
@@ -44,6 +51,9 @@ func newParser(x string) *parser {
 func (p *parser) parse() (ast.Node, error) {
 	var nodes ast.List
 	for p.s.Next() {
+		if p.err != nil {
+			break
+		}
 		tok := p.s.Token()
 		node := p.parseNode(tok)
 		if node == nil {
@@ -52,6 +62,9 @@ func (p *parser) parse() (ast.Node, error) {
 		nodes = append(nodes, node)
 	}
 
+	if p.err != nil {
+		return nil, p.err
+	}
 	return nodes, nil
 }
 
@@ -70,6 +83,16 @@ func (p *parser) expect(v rune) {
 }
 
 func (p *parser) parseNode(tok token.Token) ast.Node {
+	if p.err != nil {
+		return nil
+	}
+	p.depth++
+	defer func() { p.depth-- }()
+	if p.depth > maxParseDepth {
+		p.err = fmt.Errorf("golatex.parseNode: recursion depth %d exceeds limit %d (pos %d)", p.depth, maxParseDepth, tok.Pos)
+		return nil
+	}
+
 	switch tok.Kind {
 	case token.Comment:
 		return nil
@@ -116,7 +139,8 @@ func (p *parser) parseNode(tok token.Token) ast.Node {
 		return p.parseSymbol(tok)
 
 	default:
-		panic(fmt.Errorf("impossible: %v (%v)", tok, tok.Kind))
+		p.err = fmt.Errorf("golatex.parseNode: unexpected token %v (%v) (pos %d)", tok, tok.Kind, tok.Pos)
+		return nil
 	}
 }
 
@@ -140,9 +164,11 @@ func (p *parser) parseMathExpr(tok token.Token) ast.Node {
 	case `\[`:
 		end = `\]`
 	case `\begin`:
-		panic(fmt.Errorf("golatex.parseMathExpr: \\begin{...} environments not implemented (pos %d)", tok.Pos))
+		p.err = fmt.Errorf("golatex.parseMathExpr: \\begin{...} environments not implemented (pos %d)", tok.Pos)
+		return nil
 	default:
-		panic(fmt.Errorf("golatex.parseMathExpr: opening math-expression delimiter %q not supported (pos %d)", tok.Text, tok.Pos))
+		p.err = fmt.Errorf("golatex.parseMathExpr: opening math-expression delimiter %q not supported (pos %d)", tok.Text, tok.Pos)
+		return nil
 	}
 
 loop:

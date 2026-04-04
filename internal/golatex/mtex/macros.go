@@ -67,7 +67,6 @@ var (
 		`\frac`:     builtinMacro("AA"),
 		`\stackrel`: builtinMacro("AA"),
 		`\tfrac`:    builtinMacro("AA"),
-		`\genfrac`:  nil, // FIXME(sbinet)
 
 		// relation symbols
 		`\approx`:     builtinMacro(""),

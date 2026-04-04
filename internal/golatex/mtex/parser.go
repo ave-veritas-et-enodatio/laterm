@@ -77,7 +77,9 @@ func (v *visitor) Visit(n ast.Node) ast.Visitor {
 		case v.math:
 			h := v.p.handler(n.Text)
 			if h == nil {
-				panic("no handler for symbol [" + n.Text + "]")
+				// Unknown symbol — render as plain text rather than panicking.
+				v.nodes = append(v.nodes, tex.NewChar(n.Text, v.state, v.math))
+				return v
 			}
 			v.nodes = append(v.nodes, h.Handle(v.p, n, v.state, v.math))
 		default:
@@ -116,7 +118,9 @@ func (v *visitor) Visit(n ast.Node) ast.Visitor {
 		macro := n.Name.Name
 		h := v.p.handler(macro)
 		if h == nil {
-			panic(fmt.Errorf("unknown macro %q", macro))
+			// Unknown macro — render name as plain text rather than panicking.
+			v.nodes = append(v.nodes, tex.NewChar(macro, v.state, v.math))
+			return nil
 		}
 		v.nodes = append(v.nodes, h.Handle(v.p, n, v.state, v.math))
 		return nil
@@ -145,7 +149,8 @@ func (v *visitor) Visit(n ast.Node) ast.Visitor {
 		return v
 
 	default:
-		panic(fmt.Errorf("unknown ast node %T", n))
+		// Unknown AST node type — skip rather than panicking.
+		return v
 	}
 	return v
 }
@@ -230,7 +235,8 @@ func handleSymbol(p *parser, node ast.Node, state tex.State, math bool) tex.Node
 	case *ast.Literal:
 		sym = node.Text
 	default:
-		panic("invalid ast Node")
+		// Unrecognized node type — render placeholder rather than panicking.
+		return tex.NewChar("?", state, math)
 	}
 	ch := tex.NewChar(sym, state, math)
 	switch {
@@ -259,9 +265,9 @@ func handleSymbol(p *parser, node ast.Node, state tex.State, math bool) tex.Node
 	case symbols.PunctuationSymbols.Has(sym):
 		switch sym {
 		case ".":
-			pos := strings.Index(p.expr[pos:], sym)
-			if (pos > 0 && isdigit(p.expr[pos-1])) &&
-				(pos < len(p.expr)-1 && isdigit(p.expr[pos+1])) {
+			dotPos := strings.Index(p.expr[pos:], sym)
+			if (dotPos > 0 && isdigit(p.expr[dotPos-1])) &&
+				(dotPos < len(p.expr)-1 && isdigit(p.expr[dotPos+1])) {
 				// do not space dots as decimal separators.
 				return ch
 			}
@@ -307,21 +313,38 @@ func handleSpace(p *parser, node ast.Node, state tex.State, math bool) tex.Node 
 	case *ast.Macro:
 		width, ok = spaceWidth[node.Name.Name]
 	default:
-		panic(fmt.Errorf("invalid ast node %#v (%T)", node, node))
+		// Unknown node type for space — use default thin space width.
+		return p.makeSpace(state, 0.2)
 	}
 	if !ok {
-		panic(fmt.Errorf("could not find a width for %#v (%T)", node, node))
+		// Missing space width entry — use default thin space width.
+		return p.makeSpace(state, 0.2)
 	}
 
 	return p.makeSpace(state, width)
 }
 
 func handleCustomSpace(p *parser, node ast.Node, state tex.State, math bool) tex.Node {
-	macro := node.(*ast.Macro)
-	arg := macro.Args[0].(*ast.Arg).List[0].(*ast.Literal).Text
-	val, err := strconv.ParseFloat(arg, 64)
+	// Guard each type assertion — malformed AST yields a zero-width kern.
+	macro, ok := node.(*ast.Macro)
+	if !ok || len(macro.Args) == 0 {
+		// Malformed custom space node — degrade to zero-width kern.
+		return tex.NewKern(0)
+	}
+	arg, ok := macro.Args[0].(*ast.Arg)
+	if !ok || len(arg.List) == 0 {
+		// Missing argument — degrade to zero-width kern.
+		return tex.NewKern(0)
+	}
+	lit, ok := arg.List[0].(*ast.Literal)
+	if !ok {
+		// Unexpected argument type — degrade to zero-width kern.
+		return tex.NewKern(0)
+	}
+	val, err := strconv.ParseFloat(lit.Text, 64)
 	if err != nil {
-		panic(fmt.Errorf("could not parse customspace: %+v", err))
+		// Unparseable space value — degrade to zero-width kern.
+		return tex.NewKern(0)
 	}
 	return p.makeSpace(state, val)
 }

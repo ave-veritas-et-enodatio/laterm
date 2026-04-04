@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -42,19 +43,24 @@ type FallbackRenderer struct {
 	Logger    *slog.Logger
 }
 
-func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) ([]byte, error) {
-	result, err := f.Primary.Render(ctx, expr, mathType, maxWidth)
-	if err == nil && len(result) > 0 {
+func (f *FallbackRenderer) Render(ctx context.Context, expr string, mathType MathType, maxWidth int) (data []byte, err error) {
+	result, primaryErr := f.Primary.Render(ctx, expr, mathType, maxWidth)
+	if primaryErr == nil && len(result) > 0 {
 		return result, nil
 	}
 	if f.Logger != nil {
-		if err != nil {
+		if primaryErr != nil {
 			f.Logger.Debug("primary renderer failed, trying fallback",
-				slog.String("error", err.Error()))
+				slog.String("error", primaryErr.Error()))
 		} else {
 			f.Logger.Debug("primary renderer returned empty, trying fallback")
 		}
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("fallback renderer panic: %v", r)
+		}
+	}()
 	return f.Secondary.Render(ctx, expr, mathType, maxWidth)
 }
 

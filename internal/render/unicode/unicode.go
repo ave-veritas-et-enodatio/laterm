@@ -34,13 +34,22 @@ func (r *Renderer) Render(ctx context.Context, expr string, mathType render.Math
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	result := renderExpr(expr)
+	result := renderExpr(expr, 0)
 	return []byte(result), nil
 }
 
+// maxRenderDepth caps recursion in renderExpr to prevent stack overflow
+// from pathological input (e.g., deeply chained ^/_ without braces).
+const maxRenderDepth = 100
+
 // renderExpr is the core transformation. It walks the expression left-to-right,
-// consuming tokens and emitting Unicode.
-func renderExpr(expr string) string {
+// consuming tokens and emitting Unicode. The depth parameter tracks recursion;
+// when it exceeds maxRenderDepth the remaining expression is returned as-is.
+func renderExpr(expr string, depth int) string {
+	if depth > maxRenderDepth {
+		return expr
+	}
+
 	var b strings.Builder
 	b.Grow(len(expr))
 
@@ -50,13 +59,13 @@ func renderExpr(expr string) string {
 	for i < n {
 		switch {
 		case expr[i] == '\\':
-			i = handleBackslash(expr, i, n, &b)
+			i = handleBackslash(expr, i, n, &b, depth)
 
 		case expr[i] == '^':
-			i = handleScript(expr, i, n, &b, superscripts, '^')
+			i = handleScript(expr, i, n, &b, superscripts, '^', depth)
 
 		case expr[i] == '_':
-			i = handleScript(expr, i, n, &b, subscripts, '_')
+			i = handleScript(expr, i, n, &b, subscripts, '_', depth)
 
 		case expr[i] == '{' || expr[i] == '}':
 			// Bare braces are LaTeX grouping — strip them.
@@ -73,7 +82,7 @@ func renderExpr(expr string) string {
 
 // handleBackslash processes a backslash sequence starting at position i.
 // Returns the new position after the consumed token.
-func handleBackslash(expr string, i, n int, b *strings.Builder) int {
+func handleBackslash(expr string, i, n int, b *strings.Builder, depth int) int {
 	// A backslash at the very end — emit it literally.
 	if i+1 >= n {
 		b.WriteByte('\\')
@@ -116,12 +125,12 @@ func handleBackslash(expr string, i, n int, b *strings.Builder) int {
 
 	// \frac{a}{b} → a⁄b
 	if cmd == "frac" {
-		return handleFrac(expr, j, n, b)
+		return handleFrac(expr, j, n, b, depth)
 	}
 
 	// \sqrt{x} → √x
 	if cmd == "sqrt" {
-		return handleSqrt(expr, j, n, b)
+		return handleSqrt(expr, j, n, b, depth)
 	}
 
 	// Font-style commands: \mathcal{M} → render content (M).
@@ -129,7 +138,7 @@ func handleBackslash(expr string, i, n int, b *strings.Builder) int {
 	// style and render the argument.
 	if fontStyleCommands[cmd] {
 		arg, end := extractArg(expr, j, n)
-		b.WriteString(renderExpr(arg))
+		b.WriteString(renderExpr(arg, depth+1))
 		return end
 	}
 
@@ -166,27 +175,27 @@ func handleAccent(expr string, pos, n int, b *strings.Builder, combining string)
 }
 
 // handleFrac processes \frac{num}{den} → num⁄den.
-func handleFrac(expr string, pos, n int, b *strings.Builder) int {
+func handleFrac(expr string, pos, n int, b *strings.Builder, depth int) int {
 	num, afterNum := extractArg(expr, pos, n)
 	den, afterDen := extractArg(expr, afterNum, n)
-	b.WriteString(renderExpr(num))
+	b.WriteString(renderExpr(num, depth+1))
 	b.WriteRune('\u2044') // fraction slash
-	b.WriteString(renderExpr(den))
+	b.WriteString(renderExpr(den, depth+1))
 	return afterDen
 }
 
 // handleSqrt processes \sqrt{expr} → √(expr).
-func handleSqrt(expr string, pos, n int, b *strings.Builder) int {
+func handleSqrt(expr string, pos, n int, b *strings.Builder, depth int) int {
 	arg, end := extractArg(expr, pos, n)
 	b.WriteRune('√')
-	b.WriteString(renderExpr(arg))
+	b.WriteString(renderExpr(arg, depth+1))
 	return end
 }
 
 // handleScript processes ^ or _ followed by a single char or {group}.
 // It tries to convert each character to its Unicode super/subscript form.
 // If any character has no mapping, it falls back to prefix notation.
-func handleScript(expr string, i, n int, b *strings.Builder, table map[rune]rune, prefix byte) int {
+func handleScript(expr string, i, n int, b *strings.Builder, table map[rune]rune, prefix byte, depth int) int {
 	// Skip the ^ or _ character.
 	i++
 	if i >= n {
@@ -204,7 +213,7 @@ func handleScript(expr string, i, n int, b *strings.Builder, table map[rune]rune
 	}
 
 	// First, recursively render any LaTeX commands within the content.
-	rendered := renderExpr(content)
+	rendered := renderExpr(content, depth+1)
 
 	// Try to convert every rune.
 	var converted strings.Builder

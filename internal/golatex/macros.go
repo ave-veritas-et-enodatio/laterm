@@ -62,7 +62,6 @@ func (p *parser) addBuiltinMacros() {
 		`\frac`:     builtinMacro("AA"),
 		`\stackrel`: builtinMacro("AA"),
 		`\tfrac`:    builtinMacro("AA"),
-		`\genfrac`:  nil, // FIXME(sbinet)
 
 		// relation symbols
 		`\approx`:     builtinMacro(""),
@@ -196,7 +195,7 @@ func (p *parser) addBuiltinMacros() {
 		`\deg`:    builtinMacro(""),
 		`\det`:    builtinMacro(""),
 		`\dim`:    builtinMacro(""),
-		`\exp`:    builtinMacro("A"),
+		`\exp`:    builtinMacro(""),
 		`\gcd`:    builtinMacro(""),
 		`\hom`:    builtinMacro(""),
 		`\inf`:    builtinMacro(""),
