@@ -1,0 +1,25 @@
+*.db
+*.o
+*.obj
+*.exe
+*.dylib
+*.dll
+*.so
+*.pdb
+*.a
+*.lib
+*.gguf
+*.bin
+*.modulemap
+*.modulemap.svg
+*.cullmeta
+build/
+lib/
+bin/
+nohup.out
+.DS_Store
+.claude/settings.local.json
+# agent set working file
+.claude/session-state.md
+# agent set might create a temp worktree
+.claude/worktrees/
