@@ -40,10 +40,12 @@ blocking defect.
 
 **Resilience**
 
-6. **Graceful degradation chain.** Sixel render failure -> Unicode fallback.
-   Unknown LaTeX macro -> raw LaTeX passthrough. State machine timeout or byte
-   budget -> flush buffered bytes as literal text. Sanitizer rejection -> flush
-   as literal text. No silent data loss at any point in the chain.
+6. **Graceful degradation chain.** Sixel render failure -> Unicode fallback
+   (via `FallbackRenderer` cascade). Unicode render failure -> raw LaTeX
+   passthrough. Unknown LaTeX macro -> raw LaTeX passthrough. State machine
+   timeout or byte budget -> flush buffered bytes as literal text. Sanitizer
+   rejection -> flush as literal text. No silent data loss at any point in
+   the chain.
 
 7. **Signal fidelity.** SIGINT, SIGTERM, SIGWINCH forwarded to child process.
    SIGWINCH updates PTY size and notifies renderer of new width. Works in both
@@ -98,9 +100,13 @@ blocking defect.
     pass through unmodified.
 
 14. **False-positive mitigation.** Shell-variable heuristics reject `$PATH`,
-    `$HOME`, `$(cmd)`, `${var}`, and similar patterns. Byte budget (512 bytes
-    inline, 4096 bytes block) and time budget (200ms inline) enforce upper
-    bounds. Thresholds are configurable.
+    `$HOME`, `$(cmd)`, `${var}`, and similar patterns. A two-byte lookahead
+    disambiguates uppercase-after-dollar: `$X` followed by another letter
+    (a-z, A-Z) is a shell variable; `$X` followed by `_`, `^`, `\`, `{`,
+    digit, space, or operator is math. This is implemented as
+    `StatePotentialUpperMath`. Byte budget (512 bytes inline, 4096 bytes
+    block) and time budget (200ms inline) enforce upper bounds. Thresholds
+    are configurable.
 
 **Observability**
 
@@ -171,9 +177,9 @@ laterm/
 
 **`internal/statemachine/`**
 - Responsibility: Pure byte-level state transitions for delimiter detection.
-  Tracks six states: TEXT, ANSI_ESCAPE, POTENTIAL_MATH, INLINE_MATH,
-  BLOCK_MATH, and sub-states for ANSI sequence types (CSI, OSC, DCS, APC,
-  PM, SOS). Buffers potential math content. Enforces byte budget and reports
+  Tracks seven states: TEXT, ANSI_ESCAPE, POTENTIAL_MATH,
+  POTENTIAL_UPPER_MATH, INLINE_MATH, BLOCK_MATH, and sub-states for ANSI
+  sequence types (CSI, OSC, DCS, APC, PM, SOS). Buffers potential math content. Enforces byte budget and reports
   time budget expiry when told by the caller. Implements shell-variable
   heuristic rejection.
 - Imports: stdlib only (no external dependencies, no internal packages except
@@ -206,7 +212,12 @@ laterm/
 **`internal/render/`**
 - Responsibility: Define the `Renderer` interface. Implement renderer
   selection logic (Sixel vs. Unicode based on terminal capabilities).
-- Imports: `termcap`, `logging`.
+  Implements `FallbackRenderer` which wraps a primary and secondary
+  renderer: tries primary first, cascades to secondary on error or empty
+  result. `Select()` returns a `FallbackRenderer` when Sixel is supported
+  (Sixel primary, Unicode secondary) or the Unicode renderer directly when
+  Sixel is not available.
+- Imports: `log/slog`.
 - Must NOT import: `pty`, `stream`, `statemachine`, `sanitize`.
 - The `Renderer` interface: `Render(ctx context.Context, latex string,
   maxWidth int) ([]byte, error)`. Returns rendered bytes (Sixel escape
@@ -214,8 +225,15 @@ laterm/
 
 **`internal/render/unicode/`**
 - Responsibility: Convert LaTeX expressions to Unicode approximations using
-  lookup tables. Greek letters, common operators, simple super/subscripts.
-  Unknown macros pass through as raw LaTeX.
+  lookup tables. Handles: Greek letters (~50), operators (~30), relations
+  (~20), arrows (~15), delimiters, accents (combining characters), spacing.
+  Structural handling: `\frac{a}{b}` → `a⁄b`, `\sqrt{x}` → `√x`,
+  super/subscripts with recursive rendering (e.g., `_\infty` → `_(∞)`),
+  font-style commands (`\mathcal{M}` → `M`, plus `\mathrm`, `\mathbb`,
+  `\mathbf`, `\mathit`, `\text`, `\operatorname`, etc. — 17 commands that
+  consume their argument and render its content). Multi-character
+  sub/superscripts that can't be converted to Unicode use parenthesized
+  fallback: `_{eff}` → `_(eff)`. Unknown macros pass through as raw LaTeX.
 - Imports: stdlib plus parent `render` package (for `Renderer` interface and
   `MathType`). This is standard Go — child importing parent creates no cycle
   since the parent does not import the child.
@@ -333,6 +351,11 @@ complete. Organized by component, in implementation priority order.
   expression spans multiple lines.
 - `$PATH`, `$HOME`, `$(cmd)`, `${var}` are flushed as literal text (not
   treated as math).
+- `$H_\infty$` is detected as inline math (uppercase letter followed by
+  `_` triggers math, not shell-variable rejection).
+- `$S_{11}$` is detected as inline math (uppercase letter followed by `_`).
+- `$DISPLAY` is flushed as literal text (uppercase letter followed by
+  another letter triggers shell-variable rejection).
 - Inline byte budget (default 512 bytes) exceeded causes flush as literal.
 - Block byte budget (default 4096 bytes) exceeded causes flush as literal.
 - Inline time budget (default 200ms) exceeded causes flush as literal.
@@ -487,7 +510,12 @@ User's terminal (stdout) <------+
 - **go-latex fidelity**: The sanitizer restricts LaTeX to a safe subset.
   Some valid LaTeX that uses advanced features (custom macros, package
   imports, catcode manipulation) will be rejected and displayed as literal
-  text. This is a deliberate security/functionality tradeoff.
+  text. This is a deliberate security/functionality tradeoff. Note:
+  go-latex v0.2.0 is incomplete and panics on many common LaTeX constructs
+  (`\mathcal`, `\left`/`\right`, `\text`, parentheses in math mode).
+  These panics are caught by `recover()` and cascade to Unicode fallback.
+  A planned replacement with KaTeX + wazero will resolve this limitation
+  (see `.claude/katex_rendering.md`).
 
 - **Unicode rendering fidelity**: Unicode approximation of math is lossy.
   Complex expressions (matrices, multi-level fractions) may not render

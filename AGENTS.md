@@ -73,10 +73,12 @@ all output (passthrough, rendered math, flushed literals) through a single
 `io.Writer`. Manages the post-math output buffer and its overflow fallback.
 
 **`internal/statemachine/`** — Pure function: `(state, byte) -> (next_state,
-action)`. Six states: TEXT, ANSI_ESCAPE, POTENTIAL_MATH, INLINE_MATH,
-BLOCK_MATH, and ANSI sub-states (CSI, OSC, DCS, APC, PM, SOS). Enforces byte
-budget and reports time budget expiry. Shell-variable heuristic rejection
-(`$PATH`, `$(cmd)`, `${var}`).
+action)`. Seven states: TEXT, ANSI_ESCAPE, POTENTIAL_MATH,
+POTENTIAL_UPPER_MATH, INLINE_MATH, BLOCK_MATH, and ANSI sub-states (CSI, OSC,
+DCS, APC, PM, SOS). Enforces byte budget and reports time budget expiry.
+Shell-variable heuristic rejection (`$PATH`, `$(cmd)`, `${var}`) with
+two-byte lookahead for uppercase: `$X` followed by another letter → shell
+variable; `$X` followed by `_`, `^`, `\`, `{`, digit, operator → math.
 
 **`internal/sanitize/`** — Validates extracted LaTeX against an explicit
 allowlist of ~80–120 known-safe commands before it reaches go-latex. Enforces
@@ -86,11 +88,16 @@ error)`.
 
 **`internal/render/`** — Defines the `Renderer` interface:
 `Render(ctx, latex string, maxWidth int) ([]byte, error)`. Implements
-capability-based selection (Sixel vs. Unicode).
+capability-based selection (Sixel vs. Unicode) and `FallbackRenderer` which
+cascades: tries the primary renderer (Sixel), falls back to the secondary
+(Unicode) on error or empty result.
 
 **`internal/render/unicode/`** — Lookup-table conversion of LaTeX to Unicode
-approximations. Unknown macros pass through as raw LaTeX. No external
-dependencies.
+approximations. Handles Greek letters, operators, super/subscripts (with
+recursive rendering of `\command` in subscript position), font-style commands
+(`\mathcal{M}` → `M`, `\mathrm`, `\mathbb`, etc.), `\frac`, `\sqrt`,
+accents, and ~140 command mappings. Unknown macros pass through as raw LaTeX.
+No external dependencies.
 
 **`internal/render/sixel/`** — Parses LaTeX via go-latex, renders to
 `image.RGBA`, encodes to Sixel via go-sixel. Enforces wall-clock timeout
@@ -174,8 +181,9 @@ paths.
 
 ### Graceful degradation chain
 
-Sixel render failure → Unicode fallback → raw LaTeX passthrough. No silent
-data loss at any stage.
+Sixel render failure → Unicode fallback → raw LaTeX passthrough. The
+`FallbackRenderer` in `render/render.go` implements the Sixel → Unicode
+cascade automatically. No silent data loss at any stage.
 
 ### Post-math buffer
 
