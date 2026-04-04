@@ -1,7 +1,28 @@
-.PHONE all build clean dequarantine
+OUT ?= bin/laterm
+DIST ?= dist/laterm-darwin-arm64
 
-all: build
+.PHONY: all build test integration-test clean lint fmt dist
 
-dequarantine:
-	@echo "Dequarantining..."
-	xattr -d com.apple.quarantine bin/laterm-darwin-arm64
+all: build test
+
+build:
+	CGO_ENABLED=0 go build -o $(OUT) ./cmd/laterm/
+
+test:
+	go test ./...
+
+integration-test:
+	go test -tags integration ./...
+
+clean:
+	rm -rf bin/
+
+lint:
+	go vet ./...
+
+fmt:
+	gofmt -w .
+
+dist:
+	@mkdir -p $(dir $(DIST))
+	@$(MAKE) OUT=$(DIST) build

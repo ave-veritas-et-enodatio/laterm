@@ -15,9 +15,8 @@
 *.cullmeta
 build/
 lib/
-bin/**/**
-!bin/
-!bin/laterm-darwin-arm64
+bin/
+/laterm
 nohup.out
 .DS_Store
 .claude/settings.local.json
