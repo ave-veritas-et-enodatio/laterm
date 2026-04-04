@@ -15,8 +15,8 @@ import (
 	"image/png"
 	"log/slog"
 
-	"codeberg.org/go-latex/latex/drawtex/drawimg"
-	"codeberg.org/go-latex/latex/mtex"
+	"github.com/benn-herrera/laterm/internal/golatex/drawtex/drawimg"
+	"github.com/benn-herrera/laterm/internal/golatex/mtex"
 	sixelenc "github.com/mattn/go-sixel"
 
 	"github.com/benn-herrera/laterm/internal/logging"
