@@ -2,9 +2,22 @@ DIST ?= dist/
 
 PLATFORMS := darwin/arm64 linux/amd64
 
-.PHONY: all build test integration-test clean lint fmt dist dequarantine
+.PHONY: all build test integration-test clean lint fmt dist dequarantine agents
 
 all: build test
+
+AGENTS_VERSION ?= v0.1.0
+AGENTS_REPO := git@github.com:ave-veritas-et-enodatio/agents.git
+AGENTS_MARKER := .claude/agents/.git/HEAD
+agents: $(AGENTS_MARKER)
+
+$(AGENTS_MARKER):
+		@cd .claude/ && \
+		git clone $(AGENTS_REPO) && \
+		cd agents && \
+		git checkout $(AGENTS_VERSION) && \
+		cd .. && \
+		ln -s agents/commands .
 
 build:
 	CGO_ENABLED=0 go build -o bin/ ./cmd/laterm/
