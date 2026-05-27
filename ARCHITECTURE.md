@@ -1,10 +1,11 @@
 # LaTerm Architecture Design
 
-A Go PTY wrapper that intercepts LaTeX math expressions from child process output
-and renders them as Sixel graphics or Unicode text.
+A Claude Code sidecar that watches the active conversation log for the current
+project and renders LaTeX math expressions as inline images in a separate
+graphics-capable terminal window (kitty graphics protocol, iTerm2 imgcat, or
+Sixel).
 
-This document is the authoritative design reference. It supersedes `INITIAL_SPEC.md`
-where they conflict.
+This document is the authoritative design reference.
 
 ---
 
@@ -15,326 +16,298 @@ blocking defect.
 
 **Build and Deployment**
 
-1. **Single static binary, no CGo.** `CGO_ENABLED=0`. No external runtime
-   dependencies. Build-time Go module dependencies are permitted but must be
-   justified in the dependency table. Binary name: `laterm`.
+1. **Single self-contained binary, embedded fonts.** No external runtime
+   dependencies. KaTeX fonts are embedded via RaTeX's `embed-fonts` feature.
+   Binary name: `laterm`. Build with `cargo build --release`.
 
-2. **Makefile as single build entry point.** Required targets: `build`, `test`
-   (unit), `integration-test`. All build outputs go to `bin/` at the project
-   root, `.gitignore`d. No build outputs scattered in the source tree.
+2. **Makefile wraps cargo as the canonical build entry point.** `make build`
+   / `make test` / `make release` delegate to cargo. `make check` type-checks
+   all three release targets (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`,
+   `x86_64-pc-windows-gnu`). `make dist` cross-builds all three into `dist/` via
+   `cargo-zigbuild` (zig as the cross-linker), so all targets build from one
+   host (e.g. a Mac); it uses the `-gnu` Windows triple because zigbuild cannot
+   target `-msvc`. `make setup` installs the rustup targets and `cargo-zigbuild`
+   (zig itself comes from the system package manager, e.g. `brew install zig`).
+   `make fmt` / `make lint` run `cargo fmt` / `cargo clippy`. Plain `cargo build`
+   / `cargo test` still work. `.github/workflows/release.yml` builds each target
+   natively on its own OS runner on tags (so the shipped Windows binary is
+   `-msvc`). No build outputs are placed in the source tree.
 
 **Data Integrity**
 
-3. **Byte-transparent passthrough.** Every byte not part of a recognized math
-   expression arrives at the user's terminal unmodified, in order, with no added
-   latency. This includes ANSI escape sequences, UTF-8 multibyte characters, and
-   arbitrary binary data.
+3. **Read-only source.** laterm never writes to, modifies, or interferes with
+   the Claude Code process or its log files. Its inputs are the `*.jsonl`
+   conversation entries and its own stdin (manually typed/pasted expressions);
+   it never writes back to either source.
 
-4. **Ordered output.** Post-math text never appears before rendered math. The
-   system buffers post-math output during render. Bounded buffer with degraded
-   fallback (flush raw LaTeX) if the limit is exceeded.
+4. **Tail-only, no replay.** At startup, each existing `*.jsonl` file's current
+   byte size is recorded as its starting read offset. Bytes present at startup
+   are never emitted. Files that appear after startup are read from byte 0.
+   Exception: `--catch-up[=<MINS>]` replays entries whose RFC3339 `timestamp`
+   falls within the last MINS minutes (default 5), across all `*.jsonl` files,
+   in chronological order. The tailer records file offsets after catch-up
+   completes, so caught-up entries are never re-emitted.
 
-5. **Single terminal data path.** One read loop from the child PTY, one write
-   path to the user's terminal. The state machine sits inline in this path. Only
-   the `stream` package writes to `os.Stdout`.
+5. **Sparse feed semantics.** Only math expressions and a short window of their
+   surrounding prose (anchor context) are written to stdout. Conversation text
+   on lines with no math produces no output. A small expression renders inline
+   at text height; a tall one (rendered height ≥ 1.5× a reference capital
+   letter height) renders as its own image block on its own line. Only the
+   `main` module writes to stdout.
 
 **Resilience**
 
-6. **Graceful degradation chain.** Sixel render failure -> Unicode fallback
-   (via `FallbackRenderer` cascade). Unicode render failure -> raw LaTeX
-   passthrough. Unknown LaTeX macro -> raw LaTeX passthrough. State machine
-   timeout or byte budget -> flush buffered bytes as literal text. Sanitizer
-   rejection -> flush as literal text. No silent data loss at any point in
-   the chain.
+6. **Graphics-only, fail loud.** Math is rendered as images via a terminal
+   graphics protocol. `graphics::select` tries kitty first (env-based), then
+   imgcat (env-based), then Sixel (DA1 tty round-trip — probed last because it
+   requires a terminal query). If the terminal supports none, laterm prints an
+   error to stderr and exits at startup. There is no Unicode text fallback.
 
-7. **Signal fidelity.** SIGINT, SIGTERM, SIGWINCH forwarded to child process.
-   SIGWINCH updates PTY size and notifies renderer of new width. Works in both
-   raw and cooked mode.
+7. **Graceful rendering errors.** RaTeX returns `Result` on parse or render
+   failure — it does not panic. Any error from the rendering pipeline results in
+   the raw LaTeX being passed through as text (logged at debug level). The
+   process must never crash due to a rendering error.
 
-8. **Terminal state restoration.** The original terminal state is saved at the
-   top of `run()` (before any package touches the terminal) and restored via
-   four paths:
-   - `defer term.Restore(...)` in `run()` — normal exit and SIGTERM/SIGINT
-     (which are forwarded to the child; the child's exit causes `run()` to
-     return and the defer fires).
-   - `defer recover()` block in `run()` — panic in the main goroutine.
-   - SIGHUP/SIGQUIT signal handler goroutine — restores terminal and re-raises
-     the signal with the default handler so the process exits with the correct
-     signal status.
-   - `defer recover()` in each background goroutine — panics that would
-     otherwise leave the terminal in raw mode.
-   `session.RestoreTerminal()` is idempotent. SIGKILL and OOM are documented
-   as unrecoverable.
+8. **Rendering resource caps.** Expressions are rendered at a size suitable for
+   legibility (font size and DPI determined at runtime or by RaTeX's layout
+   options). RaTeX is synchronous and returns `Result` — no wall-clock timeout
+   is applied. A rendered PNG that exceeds 4096×4096 px (`MAX_WIDTH`/
+   `MAX_HEIGHT` in `render.rs`) returns `ImageTooLarge` and the expression falls
+   back to text passthrough.
 
-**Security**
-
-9. **LaTeX input sanitization.** All LaTeX extracted by the state machine must
-   pass through an allowlist sanitizer before reaching `go-latex`. The
-   allowlist is an explicit set of ~80-120 known-safe LaTeX commands. Any
-   command not on the allowlist causes the entire expression to be rejected and
-   flushed as literal text. The sanitizer enforces a nesting depth budget.
-   The sanitizer is stdlib-only; it does not import `go-latex` or any
-   rendering package.
-
-10. **Panic recovery at dependency boundaries.** Every call into
-    `internal/golatex` and `go-sixel` must be wrapped in `recover()`. A panic
-    from either results in the expression being flushed as literal text and a
-    warning log entry. The wrapper process must never crash due to a panic from
-    the rendering pipeline. `render.SafeRenderer` provides an additional
-    recovery wrapper around any `Renderer` implementation; `render.Select()`
-    wraps all renderers in `SafeRenderer` before returning them.
-
-11. **Rendering resource caps.** Parsing and rendering execute under a hard
-    wall-clock timeout (goroutine + `select`, not trusting `go-latex`'s
-    context support). Sixel image dimensions are capped to the terminal's
-    pixel dimensions. Oversized images fall back to Unicode or literal text.
-
-**State Machine**
-
-12. **State machine isolation.** Pure function of `(current_state, input_byte)
-    -> (next_state, output_action)` plus timer/byte-budget. No I/O, no
-    knowledge of rendering, PTYs, or terminals. Testable with pure byte
-    sequences.
-
-13. **ANSI escape sequence awareness.** The state machine must track when input
-    bytes are inside an ANSI/VT escape sequence (CSI, OSC, DCS, APC, PM, SOS,
-    and ESC-initiated sequences). A `$` byte encountered inside an escape
-    sequence must NOT trigger a math state transition. Escape sequence bytes
-    pass through unmodified.
-
-14. **False-positive mitigation.** Shell-variable heuristics reject `$PATH`,
-    `$HOME`, `$(cmd)`, `${var}`, and similar patterns. A two-byte lookahead
-    disambiguates uppercase-after-dollar: `$X` followed by another letter
-    (a-z, A-Z) is a shell variable; `$X` followed by `_`, `^`, `\`, `{`,
-    digit, space, or operator is math. This is implemented as
-    `StatePotentialUpperMath`. Byte budget (512 bytes inline, 4096 bytes
-    block) and time budget (200ms inline) enforce upper bounds. Thresholds
-    are configurable.
+   **Contrast.** At startup laterm queries the terminal background (OSC 11) and
+   renders glyphs in a contrasting color (light on a dark terminal, dark on a
+   light one) on a transparent background — no opaque box. If the query fails
+   (unsupported or timeout) it falls back to black glyphs on an opaque white
+   background, which is legible everywhere. The Sixel path is the exception: it
+   renders on an opaque background filled with the detected terminal color (or
+   white if unknown), since Sixel transparency is less universally honored.
+   RaTeX exposes glyph color and background color/alpha via its layout and
+   render options.
 
 **Observability**
 
-15. **Structured, leveled logging.** Uses `log/slog` or a thin wrapper. Writes
-    to file (mode 0600), optionally tees to stderr. Never writes to stdout.
-    Level is runtime-configurable via `LATERM_LOG_LEVEL` env var.
-    Raw child-process content appears only at debug/trace level.
-
-16. **Runtime boundary validation.** Contract checks at PTY read/write, state
-    machine transitions, renderer input, and sanitizer input. Expectation
-    checks validate goroutine context where relevant. Violations are logged
-    through the logging system, never panicked.
+9. **Structured, leveled logging.** Always writes to a log file (keeps the
+   rendered feed clean). Default path: `laterm.log` beside the executable,
+   falling back to the current working directory. Override with `--log-file
+   <PATH>`. File opened for append, mode 0600 (unix). **Never writes to
+   stdout.** Only fatal pre-exit messages go to stderr. Level is
+   runtime-configurable via `LATERM_LOG_LEVEL` (debug/info/warn/error; default
+   info).
 
 ---
 
 ## 2. Module Skeleton
 
-### Package Layout
+### Crate Layout
 
 ```
-laterm/
-  cmd/laterm/              -- main: CLI args, startup, terminal restore, exit
-  internal/
-    golatex/               -- Vendored go-latex v0.2.0 source with in-repo fixes
-      ast/                 -- AST node types
-      tex/                 -- TeX box model
-      mtex/                -- Visitor/handler layer (macro dispatch, most fixes here)
-        symbols/           -- Symbol tables
-      drawtex/             -- Canvas operations
-        drawimg/           -- Bitmap rendering (maxPixelDim=4096 cap)
-      font/ttf/            -- TTF font backend (fontFallback map for cal/bb/frak)
-      internal/            -- Internal symbol tables (tex2unicode)
-      token/               -- Token types
-    pty/                   -- PTY lifecycle: spawn, raw/cooked, signal forwarding, resize
-    stream/                -- Read loop, state machine integration, write coordination
-    statemachine/          -- Pure delimiter detection, ANSI tracking, buffering, timeouts
-    sanitize/              -- LaTeX allowlist validation, nesting depth, rejection
-    render/                -- Renderer interface, SafeRenderer, FallbackRenderer, Select()
-      unicode/             -- Unicode fallback renderer (stdlib only, maxRenderDepth=100)
-      sixel/               -- Sixel renderer (internal/golatex + go-sixel, timeout + recovery)
-    termcap/               -- DA1 query, Sixel detection, terminal size in cells + pixels
-    logging/               -- slog configuration, file + stderr output, level management
-  Makefile
-  go.mod
-  go.sum
+src/
+  main.rs          -- wiring: derive log dir, protocol select, watch loop, signal handling
+  watch.rs         -- polling tailer: *.jsonl, tail-only, partial-line buffering
+  convo.rs         -- jsonl parser: extracts text from user/assistant entries
+  mathscan.rs      -- LaTeX delimiter scanner: Unit{before, segments, after}
+  render.rs        -- RaTeX pipeline: parse → layout → display list → PNG, theme
+  graphics.rs      -- protocol selection: kitty (preferred), imgcat, or sixel
+  kitty.rs         -- kitty graphics protocol encoder; supported() detection
+  imgcat.rs        -- iTerm2 OSC 1337 encoder; supported() detection
+  sixel.rs         -- Sixel encoder; supported() via DA1 query (parse_da1)
+  termbg.rs        -- OSC 11 background query + shared query_terminal() helper
+  logging.rs       -- log configuration, file + stderr output, level management
 ```
 
-### Package Responsibilities and Constraints
+### Module Responsibilities and Constraints
 
-**`cmd/laterm/`**
-- Responsibility: Parse CLI args and env vars. Wire together all internal
-  packages. Enter raw mode (if TTY). Set up terminal state restore (defer +
-  signal handlers + panic recovery). Start the stream loop. Propagate child
-  exit code.
-- Imports: All `internal/` packages.
-- Must NOT contain: Loop logic, state machine logic, rendering logic, or
-  sanitization logic. This is wiring only.
+**`main`**
+- Responsibility: Parse CLI flags (`--log-file`, `--catch-up`, `--help`).
+  Initialize logging. Derive the Claude Code log directory for the current
+  working directory. Select a graphics protocol via `graphics::select` and exit
+  immediately (with a clear error) if none of kitty, imgcat, or Sixel is
+  supported.
+  Detect the terminal background via `termbg::query` and configure the renderer
+  theme. Compute the block-height threshold once (1.5× a reference render). If
+  `--catch-up` was given, replay recent history before starting the tailer.
+  Start the watch loop. For each line, call `convo::extract`, then
+  `mathscan::scan`; for each `Unit`, write its `before`/`after` anchor lines
+  and walk its segments — text inline, each math segment rendered via
+  `render::render` and emitted via the selected protocol's `encode` (block, on
+  its own line) or `encode_inline` (inline) by comparing the rendered height to
+  the threshold. Handle SIGINT/SIGTERM to stop the watch loop cleanly.
+- Manual input: also reads stdin (line mode) and renders each typed or pasted
+  line through the same path; a line with no delimited math is treated as one
+  bare LaTeX expression. A shared output mutex keeps conversation and manual
+  renders from interleaving mid-image.
+- Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
+  absolute working directory path is replaced by `-`.
+- Must NOT contain: rendering logic, parsing logic, or sanitization logic.
+  This is wiring only. Only this module writes to stdout.
 
-**`internal/pty/`**
-- Responsibility: Create PTY, spawn child process, manage raw/cooked mode
-  transitions, forward signals (SIGINT, SIGTERM, SIGWINCH) to child, resize
-  PTY on SIGWINCH, save and expose original terminal state for restoration.
-- Imports: `github.com/creack/pty`, `golang.org/x/term`, `logging`.
-- Must NOT import: `statemachine`, `render`, `stream`, `sanitize`.
-- Exposes the PTY as `io.Reader`/`io.Writer` and the child `*os.Process`.
-  Callers never see `creack/pty` types.
+**`watch`**
+- Responsibility: Poll `dir` at `interval` for `*.jsonl` files. Tail-only
+  semantics: existing files are recorded at their current size at startup;
+  files appearing later start at offset 0. Per tick: read newly-appended bytes,
+  split on `\n`, emit complete lines on the channel. Buffer partial lines.
+  Handle truncation/rotation by resetting to offset 0. Wait gracefully if `dir`
+  does not yet exist. Close the channel when the context/cancellation token is
+  signalled.
+- No dependencies on other laterm modules.
 
-**`internal/stream/`**
-- Responsibility: Single read loop from child PTY (`io.Reader`). Feeds bytes
-  to the state machine. Dispatches math expressions through the sanitizer
-  then to the renderer. Writes all output (passthrough text, rendered math,
-  flushed literals) to a single `io.Writer` (the user's terminal). Manages
-  the post-math output buffer and its overflow fallback.
-- Imports: `statemachine`, `sanitize`, `render`, `logging`.
-- Must NOT import: `pty`, `termcap`, `creack/pty`, `internal/golatex`, `go-sixel`.
-- Owns the single write path to the user's terminal. No other package writes
-  to stdout.
+**`convo`**
+- Responsibility: Parse one complete jsonl line. Extract text content from
+  `message.content` for entries whose top-level `type` is `"user"` or
+  `"assistant"`. Content may be a JSON array of blocks (return `type:"text"`
+  blocks only) or a plain JSON string. Return empty/None for any other entry
+  type, empty content, or parse failure. Never panic.
+- Uses `serde_json` for parsing.
+- No dependencies on other laterm modules.
 
-**`internal/statemachine/`**
-- Responsibility: Pure byte-level state transitions for delimiter detection.
-  Tracks seven states: TEXT, ANSI_ESCAPE, POTENTIAL_MATH,
-  POTENTIAL_UPPER_MATH, INLINE_MATH, BLOCK_MATH, and sub-states for ANSI
-  sequence types (CSI, OSC, DCS, APC, PM, SOS). Buffers potential math content. Enforces byte budget and reports
-  time budget expiry when told by the caller. Implements shell-variable
-  heuristic rejection.
-- Imports: stdlib only (no external dependencies, no internal packages except
-  possibly `logging` for contract-check violations).
-- Must NOT import: `render`, `sanitize`, `pty`, `stream`, `termcap`.
-- Must NOT perform I/O. Receives bytes, returns actions. The caller manages
-  timers and I/O.
-- Key design point: ANSI escape tracking is integral to the state machine,
-  not a separate filter. When the machine enters an escape sequence, `$`
-  bytes are inert.
+**`mathscan`**
+- Responsibility: Scan a markdown string for LaTeX math and return an ordered
+  stream of text/math segments. Recognized delimiters: `$$...$$` and `\[...\]`
+  (Display=true); `$...$` and `\(...\)` (Display=false). `\$` is a literal
+  dollar. `\\` prevents the following `$` from opening math. Unterminated and
+  empty spans are treated as literal text. Multi-line display blocks are
+  supported.
+- Sparse-feed semantics: output is one `Unit` per math-bearing logical line.
+  `Unit.segments` is the line's text and math interleaved in document order, so
+  a line with two expressions emits both in place with no duplication. All
+  context is bounded to ≤40 runes (word-snapped, ellipsis if truncated):
+  the line's leading text keeps its tail, trailing text keeps its head, long
+  between-expression text keeps both ends with an elided middle. `before`/
+  `after` add the nearest prose from adjacent non-math lines (crossing blank
+  lines) ONLY on a side with no same-line text — so a display block alone on
+  its line gets neighbor context, but an inline formula in a sentence is
+  anchored by its own line and does not also pull in neighbors. Lines with no
+  math contribute no unit.
+- No dependencies on other laterm modules.
 
-**`internal/sanitize/`**
-- Responsibility: Validate extracted LaTeX expressions against an explicit
-  allowlist of known-safe commands before they reach `internal/golatex`. Enforce
-  a nesting depth budget. Reject expressions containing any command not on the
-  allowlist. Rejection means the entire expression is refused (not
-  partially sanitized).
-- Imports: stdlib only. Specifically: `fmt`, `strings`.
-- Must NOT import: `internal/golatex`, `render`, `statemachine`, `pty`, `stream`.
-- The allowlist is a static data structure (map or set) defined in this
-  package. It contains ~80-120 entries covering: Greek letters, operators,
-  relation symbols, arrows, delimiters, accents, font commands, and spacing
-  (e.g., `\frac`, `\sqrt`, `\sum`, `\int`, `\lim`, `\hat`, `\mathcal`).
-  `\begin`/`\end` environments are excluded until parser support is added.
-- The sanitizer is a pure function: `(expression string) -> (clean string,
-  error)`. On rejection, the error describes which command was disallowed.
-- Nesting depth budget: configurable, default 20. Expressions exceeding it
-  are rejected.
+**`render`**
+- Responsibility: Run the full LaTeX→PNG pipeline using RaTeX. Call
+  `ratex_parser::parse`, then `ratex_layout::layout` and `to_display_list`,
+  then `ratex_render::render_to_png`. RaTeX is synchronous and returns `Result`
+  — no timeout is applied. Reject PNGs exceeding 4096×4096 px
+  (`ImageTooLarge`). On any error return `Err`; the caller passes the raw
+  LaTeX through as text. Glyph color is set via
+  `LayoutOptions::with_color(Color)`; background color and alpha via
+  `RenderOptions.background_color` (`Color { r, g, b, a: f32 }`; `a = 0.0` is
+  transparent). Returns the PNG bytes and the rendered image height in pixels
+  (used by the caller to choose inline vs block layout).
+- Imports: `ratex-parser`, `ratex-layout`, `ratex-render`, `ratex-types`.
+- Must NOT import: `watch`, `convo`, `mathscan`, `graphics`, `kitty`, `imgcat`.
 
-**`internal/render/`**
-- Responsibility: Define the `Renderer` interface. Implement renderer
-  selection logic (Sixel vs. Unicode based on terminal capabilities).
-  Implements `FallbackRenderer` which wraps a primary and secondary
-  renderer: tries primary first, cascades to secondary on error or empty
-  result. `Select()` returns a `FallbackRenderer` when Sixel is supported
-  (Sixel primary, Unicode secondary) or the Unicode renderer directly when
-  Sixel is not available.
-- Imports: `log/slog`.
-- Must NOT import: `pty`, `stream`, `statemachine`, `sanitize`.
-- The `Renderer` interface: `Render(ctx context.Context, latex string,
-  maxWidth int) ([]byte, error)`. Returns rendered bytes (Sixel escape
-  sequence or UTF-8 text). The caller writes them.
+**`graphics`**
+- Responsibility: Select the terminal image protocol. Tries kitty first
+  (env-based), then imgcat (env-based), then Sixel (DA1 tty round-trip). Returns
+  a protocol handle, or `None` when none is supported.
+- Imports: `kitty`, `imgcat`, `sixel`.
+- Must NOT import: `render`, `mathscan`, `convo`, `watch`.
 
-**`internal/render/unicode/`**
-- Responsibility: Convert LaTeX expressions to Unicode approximations using
-  lookup tables. Handles: Greek letters (~50), operators (~30), relations
-  (~20), arrows (~15), delimiters, accents (combining characters), spacing.
-  Structural handling: `\frac{a}{b}` → `a⁄b`, `\sqrt{x}` → `√x`,
-  super/subscripts with recursive rendering (e.g., `_\infty` → `_(∞)`),
-  font-style commands (`\mathcal{M}` → `M`, plus `\mathrm`, `\mathbb`,
-  `\mathbf`, `\mathit`, `\text`, `\operatorname`, etc. — 17 commands that
-  consume their argument and render its content). Multi-character
-  sub/superscripts that can't be converted to Unicode use parenthesized
-  fallback: `_{eff}` → `_(eff)`. Unknown macros pass through as raw LaTeX.
-- Imports: stdlib plus parent `render` package (for `Renderer` interface and
-  `MathType`). This is standard Go — child importing parent creates no cycle
-  since the parent does not import the child.
-- Must NOT import: `internal/golatex`, `go-sixel`, `render/sixel`.
+**`kitty`**
+- Responsibility: Detect kitty graphics support and encode PNG bytes as the
+  kitty graphics protocol. PNG (`f=100`) transmitted in ≤4096-byte base64
+  chunks via `ESC _ G ... ESC \` APC escapes, displayed at the cursor (`a=T`).
+  `supported()` checks `KITTY_WINDOW_ID`, `TERM` containing `kitty`/`ghostty`,
+  or `TERM_PROGRAM == "ghostty"`. `encode(png)`: native size.
+  `encode_inline(png)`: adds `r=1` (one text row).
+- Uses `base64` crate.
+- No dependencies on other laterm modules.
 
-**`internal/render/sixel/`**
-- Responsibility: Parse LaTeX via `internal/golatex`, render to `image.RGBA`,
-  encode to Sixel via `go-sixel`. Enforce wall-clock timeout around the entire
-  parse-render-encode pipeline. Cap image dimensions to terminal pixel bounds.
-  Wrap all `internal/golatex` and `go-sixel` calls in `recover()`. On any
-  failure (timeout, panic, oversized, error) return an error so the caller can
-  fall back.
-- Imports: `github.com/ave-veritas-et-enodatio/laterm/internal/golatex/...`,
-  `github.com/mattn/go-sixel`, `logging`.
-- Must NOT import: `pty`, `stream`, `statemachine`, `sanitize`, `unicode/`.
-- Timeout: the entire Render call runs in a goroutine; the caller selects
-  on the result channel and a context deadline. If the goroutine outlives
-  the deadline, the result is discarded. Default timeout: 5 seconds for
-  block math, 2 seconds for inline.
-- Panic recovery: a `defer recover()` inside the render goroutine catches
-  panics from `internal/golatex` and `go-sixel`, converts them to errors.
-- Image dimension cap: before Sixel encoding, check image bounds against
-  terminal pixel dimensions from `termcap`. If either dimension exceeds
-  the terminal, return an error (caller falls back to Unicode or literal).
+**`imgcat`**
+- Responsibility: Detect iTerm2/WezTerm imgcat support and encode PNG bytes as
+  the iTerm2 OSC 1337 inline-image escape sequence.
+  `supported()` checks `TERM_PROGRAM == "iTerm.app"`, `LC_TERMINAL == "iTerm2"`,
+  or `TERM_PROGRAM == "WezTerm"`. `encode(png)`: native-size sequence —
+  `ESC ] 1337 ; File=inline=1;size=<len>:<base64> BEL`. `encode_inline(png)`:
+  same with `height=1;preserveAspectRatio=1`.
+- Uses `base64` crate.
+- No dependencies on other laterm modules.
 
-**`internal/termcap/`**
-- Responsibility: Query terminal capabilities. Send DA1 (`\x1b[c`) and
-  parse response for Sixel support (attribute `4`). Query terminal size
-  in cells (`TIOCGWINSZ`) and pixels. Provide current dimensions on demand
-  (updated on SIGWINCH notification).
-- Imports: `golang.org/x/term`, `logging`.
-- Must NOT import: `pty`, `stream`, `statemachine`, `render`, `sanitize`.
+**`sixel`**
+- Responsibility: Detect Sixel support and encode PNG bytes as a Sixel escape
+  sequence. `supported()` sends a DA1 query (`\x1b[c`) via `termbg`'s shared
+  `query_terminal()` helper and returns true when attribute `4` appears in the
+  `\x1b[?<attrs>c` reply (`parse_da1`). The helper handles raw-tty/Console API
+  setup on both unix and Windows, so DA1 works on Windows Terminal. `encode(png)`
+  decodes the PNG to RGBA8 using the `png` crate, then emits a standard Sixel
+  stream: DCS introducer + 1:1 raster attributes, RGB color registers scaled to
+  0–100, 6-row bands with per-color RLE. Colors are collected directly from the
+  pixels (with progressive bit-dropping when the palette would exceed 256
+  registers) — no quantization crate is used. `encode_inline(png)` is identical
+  to `encode` (Sixel has no cell-based scaling equivalent to kitty's `r=1`).
+  The renderer uses an **opaque** background (terminal color or white) for the
+  Sixel path, because Sixel transparency is less universally honored than the
+  transparent path kitty/imgcat use.
+- Uses `png` crate (decode) and `termbg::query_terminal` (DA1 probe).
+  The Sixel encoder itself is in-house and dependency-free (no sixel or
+  quantization crate).
+- No laterm module imports except `termbg::query_terminal`.
 
-**`internal/logging/`**
-- Responsibility: Configure `log/slog` with structured output. Support file
-  output (mode 0600) and optional stderr tee. Parse and apply log level from
-  env var. Provide package-level access to the configured logger.
-- Imports: stdlib only (`log/slog`, `os`, `io`).
-- Must NOT import: any other internal package.
-- Log file path configurable via `LATERM_LOG_FILE` env var.
-  Default: no file (stderr only if enabled).
+**`termbg`**
+- Responsibility: Query the terminal background color via OSC 11
+  (`ESC ] 11 ; ?`), with a timeout, so the renderer can choose a contrasting
+  glyph color. Parses the `rgb:RRRR/GGGG/BBBB` reply.
+  `query(timeout) -> Option<(u8, u8, u8)>` and `is_dark(r, g, b) -> bool`
+  are platform-independent. `query_terminal(request, timeout) -> Option<String>`
+  is a shared helper used by both the OSC 11 query and `sixel`'s DA1 probe —
+  it sends an arbitrary terminal request in raw mode and returns the reply.
+  Platform implementations:
+  - **unix** — opens `/dev/tty`, uses the `libc` crate for termios raw mode
+    (`cfmakeraw`/`tcsetattr`) and `select(2)` for the read timeout.
+  - **Windows** — uses the `windows-sys` crate's Console API:
+    `GetStdHandle`, `SetConsoleMode` with `ENABLE_VIRTUAL_TERMINAL_INPUT`,
+    `WaitForSingleObject` for the timeout, `ReadConsoleA` for the reply.
+    Windows is not a stub — it has full OSC 11 parity.
+- No dependencies on other laterm modules.
+
+**`logging`**
+- Responsibility: Configure structured, leveled logging. File output at mode
+  0600, append, path resolved by `main` (from `--log-file` or the default
+  beside the executable). Parse and apply log level from `LATERM_LOG_LEVEL`.
+  If the file cannot be opened, prints one warning to stderr and disables
+  logging for the run.
+- Never writes to stdout.
 
 ### Dependency Direction
 
 ```
-cmd/laterm
+main
   |
-  +---> pty
-  +---> stream ---> statemachine
-  |       |    \--> sanitize
-  |       |     \-> render (interface)
-  |       |
-  +---> render ---> render/unicode
-  |       |    \--> render/sixel
-  |       |
-  +---> termcap
+  +---> watch
+  +---> convo
+  +---> mathscan
+  +---> render  (uses ratex-parser, ratex-layout, ratex-render, ratex-types)
+  +---> graphics --> kitty  (uses base64)
+  |             |--> imgcat (uses base64)
+  |             \--> sixel  (uses png; calls termbg::query_terminal)
+  +---> termbg
   +---> logging
 
-All packages -----> logging (for contract checks and diagnostics)
-
-External deps:
-  pty          --> github.com/creack/pty, golang.org/x/term
-  termcap      --> golang.org/x/term
-  render/sixel --> internal/golatex/, github.com/mattn/go-sixel
-  golatex/     --> codeberg.org/go-fonts/*, golang.org/x/image (font rendering)
+(all modules may use logging)
 ```
 
-Dependency direction is strictly downward. No cycles. `statemachine` and
-`sanitize` depend only on stdlib. go-sixel is confined to `render/sixel/`.
-The PTY dependency is confined to `internal/pty/`. go-latex source lives in
-`internal/golatex/` and is imported only by `render/sixel/`.
+Dependency direction is strictly downward. No cycles. `watch`, `convo`, and
+`mathscan` depend only on the standard library; they do not import any other
+laterm module. `termbg` uses `libc` (unix) or `windows-sys` (Windows) for
+raw-mode terminal I/O. `render` is the only module that imports the RaTeX
+crates. `main` uses the `ctrlc` crate for cross-platform signal handling
+(SIGINT/SIGTERM). `main` selects a protocol via `graphics::select`.
 
 ### Dependency Justification
 
-| Dependency | Package | Justification |
+| Dependency | Module | Justification |
 |---|---|---|
-| `github.com/creack/pty` | `internal/pty` | PTY creation and management. Go stdlib has no PTY support. Mature, widely used, pure Go. |
-| `golang.org/x/term` | `internal/pty`, `internal/termcap` | Terminal raw mode, state save/restore, size queries. Extended stdlib maintained by Go team. |
-| `github.com/mattn/go-sixel` | `internal/render/sixel` | Sixel encoding from `image.Image`. Non-trivial protocol implementation. Confined behind panic recovery. |
-| `codeberg.org/go-fonts/*` | `internal/golatex/font/ttf` | Font data consumed by vendored go-latex font backend. Required for LaTeX glyph rendering. |
-| `golang.org/x/image` | `internal/golatex` | Image primitives used by vendored go-latex rendering pipeline. |
-| `golang.org/x/sys/unix` | `internal/termcap` | TIOCGWINSZ ioctl for terminal pixel dimensions. Extended stdlib maintained by Go team. Required because `golang.org/x/term` does not expose pixel dimensions. |
-| `codeberg.org/go-pdf/fpdf` | `internal/golatex/drawpdf` | Consumed by vendored go-latex rendering backends. `drawpdf` has no production caller; PDF output is not on the shipped code path. |
-| `git.sr.ht/~sbinet/gg` | `internal/golatex/drawimg` | Consumed by vendored go-latex rendering backends. |
-
-`codeberg.org/go-latex/latex` is no longer an external dependency. Its source
-is vendored at `internal/golatex/` with import paths rewritten to the project
-module path.
+| `ratex-parser` v0.1.9 | `render` | KaTeX-compatible LaTeX parser; pure Rust, no external runtime |
+| `ratex-layout` v0.1.9 | `render` | TeX box-model layout engine for the RaTeX pipeline |
+| `ratex-render` v0.1.9 (`embed-fonts`) | `render` | PNG renderer; `embed-fonts` bundles KaTeX fonts into the binary, eliminating external font dependencies |
+| `ratex-types` v0.1.9 | `render` | Shared type definitions required to wire the RaTeX pipeline stages |
+| `serde` v1 | `convo` | Derive macros for JSON deserialization |
+| `serde_json` v1 | `convo` | Parsing `.jsonl` conversation log entries |
+| `base64` v0.22 | `graphics` | Encoding PNG bytes for kitty and imgcat image protocols |
+| `png` v0.17 | `sixel` | PNG→RGBA8 decode for the Sixel encoder; no sixel or quantization crate is used — the encoder is in-house |
+| `chrono` v0.4 | `main` | RFC3339 timestamp parsing for `--catch-up` window filtering |
+| `ctrlc` v3 | `main` | Cross-platform SIGINT/SIGTERM handler (MIT/Apache-2.0) |
+| `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`) | termios raw mode + `select(2)` for OSC 11 background query |
+| `windows-sys` v0.59 | `termbg` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`) for OSC 11 background query |
 
 No other external dependencies are permitted without updating this table and
 providing justification.
@@ -346,203 +319,184 @@ providing justification.
 Observable behavioral outcomes that must be true when implementation is
 complete. Organized by component, in implementation priority order.
 
-### PTY Proxy (Priority 1)
+### Sidecar startup (Priority 1)
 
-- `laterm bash` behaves identically to `bash` for interactive use: arrow
-  keys, tab completion, history navigation, Ctrl+C, Ctrl+D, Ctrl+Z all
-  function correctly.
-- `echo "hello" | laterm cat` works in cooked mode (stdin is not a TTY).
-- Terminal resize is reflected in the child process (i.e., `stty size` in
-  the child reports updated dimensions after the parent terminal is resized).
-- SIGINT sent to `laterm` is forwarded to the child process.
-- `laterm` exits with the same exit code as the child process.
-- Non-math bytes from the child arrive at the user's terminal unmodified.
-- If `laterm` is killed by SIGTERM, SIGINT, SIGHUP, or SIGQUIT while in
-  raw mode, the user's terminal is restored to its original state.
-- If a panic occurs in `main`, the terminal is restored before the process
-  exits.
-- SIGKILL and OOM are documented as unrecoverable; terminal state may be
-  left corrupted (user runs `reset`).
+- `laterm` spawns no child process. Accepted flags: `--log-file <PATH>`,
+  `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`. Unknown flags or a
+  missing `--log-file` argument exit non-zero with a usage message to stderr.
+- If the terminal supports none of kitty, imgcat, or Sixel (`graphics::select`
+  returns `None`), laterm prints a clear error to stderr and exits non-zero
+  immediately. No further work is done.
+- When multiple protocols are available, kitty is preferred over imgcat over
+  Sixel.
+- At startup the terminal background is queried (OSC 11); on success glyphs are
+  rendered in a contrasting color on a transparent background, otherwise
+  black-on-white is used. Detection failure is not fatal.
+- If `std::env::current_dir()` fails, laterm prints an error to stderr and
+  exits non-zero.
+- If the derived log directory does not yet exist, laterm waits (polling
+  continues) rather than exiting.
+- SIGINT and SIGTERM stop the poll loop and cause laterm to exit 0.
+- Manual input: a line typed or pasted into the window is rendered. A line with
+  delimited math is treated like conversation text; a line with no delimiters is
+  rendered as one bare LaTeX expression. Empty lines are ignored.
 
-### State Machine (Priority 2)
+### File watcher (Priority 1)
 
-- `$\sigma$` is detected as inline math and the content `\sigma` is
-  extracted.
-- `$$\int_0^1 f(x) dx$$` is detected as block math, including when the
-  expression spans multiple lines.
-- `$PATH`, `$HOME`, `$(cmd)`, `${var}` are flushed as literal text (not
-  treated as math).
-- `$H_\infty$` is detected as inline math (uppercase letter followed by
-  `_` triggers math, not shell-variable rejection).
-- `$S_{11}$` is detected as inline math (uppercase letter followed by `_`).
-- `$DISPLAY` is flushed as literal text (uppercase letter followed by
-  another letter triggers shell-variable rejection).
-- Inline byte budget (default 512 bytes) exceeded causes flush as literal.
-- Block byte budget (default 4096 bytes) exceeded causes flush as literal.
-- Inline time budget (default 200ms) exceeded causes flush as literal.
-- Consecutive math expressions (e.g., `$a$ and $b$`) are detected and
-  rendered independently.
-- A `$` byte inside a CSI sequence (e.g., `\x1b[...$..$m`) does not
-  trigger a math state transition.
-- A `$` byte inside an OSC sequence (e.g., `\x1b]...$...\x07`) does not
-  trigger a math state transition.
-- A `$` byte inside DCS, APC, PM, and SOS sequences does not trigger a
-  math state transition.
-- ANSI escape sequences pass through to the terminal unmodified regardless
-  of state machine state.
-- The state machine has no I/O dependencies; it is fully testable with pure
-  byte sequences and deterministic timer signals.
+- Bytes present in `*.jsonl` files at startup are not emitted.
+- New bytes appended after startup are emitted as complete `\n`-terminated lines.
+- A file appearing after startup is read from byte 0.
+- A file that shrinks (truncation/rotation) is re-read from byte 0.
+- A partial line (no trailing `\n`) is buffered and emitted once completed.
+- The channel/iterator is closed when cancellation is signalled.
 
-### Sanitizer (Priority 2, parallel with state machine)
+### Conversation parser (Priority 2)
 
-- An expression containing only allowlisted commands (e.g.,
-  `\frac{\alpha}{\beta}`) passes validation unchanged.
-- An expression containing a non-allowlisted command (e.g., `\input{file}`,
-  `\write`, `\catcode`, `\def`, `\newcommand`) is rejected entirely.
-- Rejection means the caller receives an error; the expression is not
-  partially passed through.
-- Nesting depth exceeding the budget (default 20) causes rejection.
-- The allowlist contains entries for: Greek letters (alpha through omega,
-  upper and lower), common operators (`\frac`, `\sqrt`, `\sum`, `\prod`,
-  `\int`, `\lim`, `\log`, `\sin`, `\cos`, `\tan`, etc.), relation symbols
-  (`\leq`, `\geq`, `\neq`, `\approx`, `\equiv`, etc.), arrows
-  (`\rightarrow`, `\leftarrow`, `\Rightarrow`, etc.), delimiters (`\left`,
-  `\right`, `\big`, `\Big`, etc.), accents (`\hat`, `\bar`, `\tilde`,
-  `\vec`, etc.), and spacing commands (`\,`, `\;`, `\quad`, `\qquad`, etc.).
-  `\begin`/`\end` environments are not currently allowed — they were removed
-  from the allowlist because the parser does not yet support them.
-- The sanitizer has no dependency on `go-latex`. It operates on the raw
-  LaTeX string using its own command extraction logic.
-- Expressions with no backslash commands (e.g., `x + y = z`, `2^{10}`)
-  pass validation (they contain no commands to reject).
+- Entries with `type` other than `"user"` or `"assistant"` return None/empty.
+- `message.content` as a JSON array: only `type:"text"` blocks are returned.
+- `message.content` as a plain JSON string: returned as a single segment.
+- Malformed JSON returns None/empty without panicking.
 
-### Unicode Renderer (Priority 3)
+### Math scanner (Priority 2)
 
-- Greek letters (`\alpha` through `\omega`, `\Gamma` through `\Omega`)
-  render as their Unicode equivalents.
-- Common operators render: `\int` -> `\u222B`, `\sum` -> `\u2211`,
-  `\prod` -> `\u220F`, `\infty` -> `\u221E`, `\pm` -> `\u00B1`,
-  `\times` -> `\u00D7`, `\div` -> `\u00F7`, `\partial` -> `\u2202`.
-- Simple superscripts render: `^2` -> superscript 2, `^n` -> superscript n
-  (where Unicode superscript exists).
-- Simple subscripts render: `_i` -> subscript i, `_0` -> subscript 0
-  (where Unicode subscript exists).
-- Unknown macros are passed through as raw LaTeX text (e.g., `\obscure`
-  appears as `\obscure` in the output).
-- The Unicode renderer uses stdlib only (no external dependencies).
+- `$\sigma$` → one unit containing one inline math segment `"\sigma"`.
+- `$$\int_0^1 f(x)\,dx$$` → one unit with one display math segment; multi-line
+  spans supported; trailing text on the closing line is kept as a text segment.
+- `\(\sigma\)` → inline; `\[...\]` → display.
+- `\$` is treated as a literal dollar and does not open a math span.
+- Empty expressions (e.g. `$$`) and unterminated spans are treated as literal
+  text (no unit emitted if that leaves the input math-free).
+- Two expressions on one line produce a SINGLE unit with both math segments in
+  order, interleaved with their surrounding text — no duplication.
+- Leading/between/trailing text on a math line is preserved as text segments;
+  whole lines with no math are dropped; `scan` returns empty if the input has
+  no math.
+- The formula's own-line text is bounded to ≤40 runes per side (a long sentence
+  containing a formula does not echo in full).
+- `before`/`after` carry the nearest prose from adjacent non-math lines
+  (crossing blank lines), bounded to ≤40 runes, and are populated only on a
+  side lacking same-line text. A display block alone on its line picks up the
+  prose from the preceding/following lines; an inline formula in a sentence does
+  not.
 
-### Sixel Renderer (Priority 4)
+### Renderer (Priority 3)
 
-- Output is a valid Sixel escape sequence (begins with `\x1bP`, ends with
-  `\x1b\\`).
-- Rendered image width does not exceed the terminal's pixel width.
-- Rendered image height does not exceed the terminal's pixel height.
-- If the computed image dimensions would exceed terminal pixel bounds, the
-  renderer returns an error (caller falls back).
-- Rendering completes within the wall-clock timeout (default 2s inline, 5s
-  block). If it does not, the result is discarded and an error is returned.
-- A panic in `internal/golatex` during parsing does not crash the process; it
-  is recovered, logged, and results in fallback.
-- A panic in `go-sixel` during encoding does not crash the process; same
-  recovery behavior.
-- DA1 capability detection correctly identifies Sixel support (attribute `4`
-  in the response).
-- When Sixel is not supported by the terminal, the system selects the
-  Unicode renderer at startup without attempting Sixel rendering.
+- `render::render` returns `Err` on RaTeX parse or render failure; the process
+  does not exit.
+- A PNG exceeding 4096×4096 px returns `ImageTooLarge`.
+- `render::render` returns the rendered image height; `main` renders a reference
+  capital letter once and treats expressions whose height is ≥ 1.5× that as
+  block (own line), shorter ones as inline (one text row).
+- On any error from `render::render`, `main` logs at debug and passes the raw
+  LaTeX through (delimited) rather than dropping it.
 
-### Cross-Cutting
+### Graphics protocols (Priority 3)
 
-- Log output goes to a file (when configured) with mode 0600. Log file
-  path is configurable via `LATERM_LOG_FILE`.
-- Log level is configurable via `LATERM_LOG_LEVEL` env var. Supports at
-  minimum: debug, info, warn, error.
-- Raw child-process content (the actual bytes being processed) appears only
-  at debug or trace level, never at info or above.
-- Nothing appears on stdout except terminal data intended for the user's
-  display.
-- `make build` produces `bin/laterm`.
-- `make test` runs unit tests.
-- `make integration-test` runs integration tests.
-- Runtime contract checks (invalid state transitions, nil arguments at
-  boundaries, out-of-range values) are logged through the logging system,
-  never cause a panic.
-- Post-math output buffering has a bounded size. If the buffer fills during
-  rendering, the system flushes the raw LaTeX and unblocks the output
-  stream rather than blocking indefinitely or consuming unbounded memory.
-- Fuzz tests exist for the state machine (byte sequences) and the sanitizer
-  (LaTeX strings) to exercise panic paths and edge cases.
+- `graphics::select` returns kitty when `kitty::supported()` (env:
+  `KITTY_WINDOW_ID`, `TERM` containing `kitty`/`ghostty`,
+  `TERM_PROGRAM == "ghostty"`), else imgcat when `imgcat::supported()`
+  (`TERM_PROGRAM == "iTerm.app"`, `LC_TERMINAL == "iTerm2"`,
+  `TERM_PROGRAM == "WezTerm"`), else Sixel when `sixel::supported()` (DA1
+  reply contains attribute `4`), else `None`.
+- `imgcat::encode(png)` begins with `\x1b]1337;File=inline=1;` and ends with
+  `\a` (BEL); `encode_inline(png)` adds `height=1;preserveAspectRatio=1`.
+- `kitty::encode(png)` emits one or more `\x1b_G…\x1b\\` APC escapes (first
+  with `a=T,f=100`), base64 PNG in ≤4096-byte chunks, final chunk `m=0`;
+  `encode_inline(png)` adds `r=1` (one text row).
+- `termbg::query` parses an OSC 11 reply (`rgb:RRRR/GGGG/BBBB`) to RGB;
+  `is_dark` thresholds on relative luminance.
+
+### Cross-cutting
+
+- Nothing appears on stdout except graphics-protocol escape sequences (kitty,
+  imgcat, or Sixel) and their anchor text.
+- Log output always goes to a file (mode 0600, append). Default path:
+  `laterm.log` beside the executable (falls back to cwd). Overridden by
+  `--log-file <PATH>`. If the file cannot be opened, one warning goes to stderr
+  and logging is disabled for the run.
+- Log level is configurable via `LATERM_LOG_LEVEL` (debug, info, warn, error).
+- `--catch-up[=<MINS>]`: before the tail starts, all `*.jsonl` files in the
+  log directory are scanned; entries whose RFC3339 `timestamp` is at or after
+  `now - MINS minutes` are collected, sorted by timestamp, and rendered in
+  order. The tailer then records file offsets, so no caught-up entry is
+  re-emitted. Absent or unparseable timestamps are excluded.
+- `make release` (or `cargo build --release`) produces a self-contained binary
+  with fonts embedded. `make dist` builds release binaries for all three
+  release targets into `dist/`.
+- `make test` (or `cargo test`) runs unit tests.
 
 ---
 
 ## 4. Data Flow Summary
 
-This section describes the runtime data flow for reference. It is not
-prescriptive about implementation details.
-
 ```
-User's terminal (stdin)
-     |
-     v
-  [laterm main]
-     |
-     +--> input bytes --> child PTY (stdin) --> child process
-     |
-     |    child process --> child PTY (stdout)
-     |                          |
-     |                          v
-     |                    [stream: read loop]
-     |                          |
-     |                          v
-     |                    [statemachine: byte-by-byte]
-     |                     /         \
-     |               passthrough    math expression extracted
-     |                  |                    |
-     |                  |                    v
-     |                  |              [sanitize: allowlist check]
-     |                  |               /              \
-     |                  |          rejected           accepted
-     |                  |           |                    |
-     |                  |      flush literal             v
-     |                  |           |              [render: Sixel or Unicode]
-     |                  |           |               /              \
-     |                  |           |          success            failure
-     |                  |           |            |                  |
-     |                  |           |       rendered bytes     flush literal
-     |                  |           |            |                  |
-     |                  v           v            v                  v
-     |                [stream: single write path to stdout]
-     |                          |
-     v                          v
-User's terminal (stdout) <------+
+Claude Code process
+  |
+  | appends entries to ~/.claude/projects/<cwd>/.../*.jsonl
+  v
+
+[watch: poll ~500ms]
+  |
+  | one complete jsonl entry per line
+  v
+
+[convo::extract]
+  |
+  | text content from user/assistant entries
+  | (None for other entry types, empty content, parse failure)
+  v
+
+[mathscan::scan]
+  |
+  | Vec<Unit{before, segments, after}> — one unit per math-bearing line
+  | (empty when no math found — these entries produce no output)
+  v
+
+for each unit: write before anchor line, then walk segments in order:
+  Text segment  -> write text inline
+  Math segment  -> [render::render] -> Result<(png_bytes, height), _>
+                     |
+                     +-- ratex_parser::parse
+                     +-- ratex_layout::layout + to_display_list
+                     +-- ratex_render::render_to_png
+                     |     size cap: 4096×4096 px → ImageTooLarge
+                     |     on Err: pass through raw LaTeX (delimited)
+                     v
+                  height >= threshold ? proto.encode (block, own line)
+                                      : proto.encode_inline (inline, 1 row)
+                  (proto = kitty if available, else imgcat, else sixel;
+                   glyph color contrasts the detected terminal background;
+                   sixel path uses opaque background)
+  then write after anchor line
+
+stdout: anchor context + the unit's text and images in document order
 ```
 
 ---
 
-## 5. Known Limitations (Document in README)
+## 5. Known Limitations
 
-- **Terminal escape passthrough**: A malicious child process could emit
-  arbitrary terminal escape sequences. `laterm` passes all non-math
-  terminal escapes through unmodified. This is accepted risk; filtering
-  terminal escapes would break legitimate terminal functionality.
+- **Graphics-protocol terminals only.** laterm requires a terminal that
+  supports the kitty graphics protocol (kitty, ghostty), the iTerm2 imgcat
+  protocol (iTerm2, WezTerm), or Sixel (Windows Terminal v1.22+, xterm, foot,
+  mlterm, WezTerm, and others). Selection order: kitty → imgcat → Sixel.
+  There is no Unicode text fallback; unsupported terminals are rejected at
+  startup.
 
-- **SIGKILL/OOM**: If `laterm` is killed by SIGKILL or terminated by OOM,
-  the terminal may be left in raw mode. The user must run `reset` to
-  recover. This is inherent to any program that modifies terminal state.
+- **Background detection is best-effort.** Glyph contrast relies on an OSC 11
+  background query; terminals that do not answer (within 200 ms) get the
+  black-on-white fallback rather than theme-matched glyphs.
 
-- **go-latex fidelity**: The sanitizer restricts LaTeX to a safe subset.
-  Some valid LaTeX that uses advanced features (custom macros, package
-  imports, catcode manipulation) will be rejected and displayed as literal
-  text. This is a deliberate security/functionality tradeoff. go-latex v0.2.0
-  source is vendored at `internal/golatex/` with fixes applied for common
-  constructs (`\mathcal`, `\mathbb`, `\left`/`\right`, `\text`, parentheses
-  in math mode, `\operatorname`, accents, and others). Remaining unimplemented
-  handlers still panic; these are caught by `recover()` and cascade to Unicode
-  fallback. `internal/golatex/mtex/fixes_test.go` tracks known-broken
-  constructs with `stillPanics` flags. A planned replacement with KaTeX +
-  wazero will resolve this limitation more completely (see
-  `.claude/katex_rendering.md`).
+- **Polling, not inotify.** The watcher uses a 500 ms polling interval. Math in
+  a conversation entry may appear up to 500 ms after it is written.
 
-- **Unicode rendering fidelity**: Unicode approximation of math is lossy.
-  Complex expressions (matrices, multi-level fractions) may not render
-  readably. The Sixel path handles these; Unicode is a best-effort
-  fallback.
+---
+
+## 6. Prototype
+
+The original Go implementation lives under `prototype/`. It validated the
+design — the watch/tail logic, mathscan windowing rules, sparse-feed semantics,
+kitty/imgcat escape formats, and OSC 11 contrast detection are all carried
+forward unchanged in the Rust implementation. The prototype still builds (see
+`prototype/Makefile`) and is the reference for behavior details. It is not part
+of the Rust build and is not the shipped tool.

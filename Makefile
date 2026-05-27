@@ -1,52 +1,66 @@
-DIST ?= dist/
+# laterm — Rust build convenience wrapper over cargo.
+# (The Go research prototype keeps its own Makefile under prototype/.)
+#
+# Release targets. Cross-compiling all three from one host needs the target's
+# linker/toolchain; in practice build each on its native OS (CI does this on
+# tags via .github/workflows/release.yml) or run `make dist` on each machine.
+TARGETS := aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+DIST    := dist
 
-PLATFORMS := darwin/arm64 linux/amd64
-
-.PHONY: all build test integration-test clean lint fmt dist dequarantine agents
+.PHONY: all setup build release test fmt lint check clean dist
 
 all: build test
 
-AGENTS_VERSION ?= v0.1.0
-AGENTS_REPO := git@github.com:ave-veritas-et-enodatio/agents.git
-AGENTS_MARKER := .claude/agents/.git/HEAD
-agents: $(AGENTS_MARKER)
+## setup: install rustup targets + cargo-zigbuild for cross-compiling.
+## Requires zig (brew install zig) — zig provides the cross-linker so Rust
+## cross-compiles from any host (like Go/zig), incl. Mac → Linux/Windows.
+setup:
+	rustup target add $(TARGETS)
+	cargo install cargo-zigbuild || true
+	@command -v zig >/dev/null || echo "NOTE: install zig (brew install zig) for cross-compilation"
 
-$(AGENTS_MARKER):
-		@cd .claude/ && \
-		git clone $(AGENTS_REPO) && \
-		cd agents && \
-		git checkout $(AGENTS_VERSION) && \
-		cd .. && \
-		ln -s agents/commands .
-
+## build: debug build for the host
 build:
-	CGO_ENABLED=0 go build -o bin/ ./cmd/laterm/
+	cargo build
 
+## release: optimized build for the host (target/release/laterm)
+release:
+	cargo build --release
+
+## test: run the unit tests
 test:
-	go test ./...
+	cargo test
 
-integration-test:
-	go test -tags integration ./...
-
-clean:
-	rm -rf bin/
-
-lint:
-	go vet ./...
-
+## fmt: format the source
 fmt:
-	gofmt -w .
+	cargo fmt
 
+## lint: clippy across all targets
+lint:
+	cargo clippy --all-targets
+
+## check: type-check for every release target (validates cross-platform cfg)
+check:
+	@for t in $(TARGETS); do echo "check $$t"; cargo check --target $$t || exit 1; done
+
+## clean: remove build artifacts
+clean:
+	cargo clean
+	rm -rf $(DIST)
+
+## dist: cross-build every target via cargo-zigbuild and stage binaries in
+## dist/. Works from any host (needs zig + cargo-zigbuild; run `make setup`).
 dist:
-	@mkdir -p "$(DIST)"
-	@for platform in $(PLATFORMS); do \
-		GOOS=$${platform%/*}; \
-		GOARCH=$${platform#*/}; \
-		output="$(DIST)/laterm-$${GOOS}-$${GOARCH}"; \
-		[[ "$$GOOS" != "windows" ]] || output="$${output}.exe"; \
-		echo "Building $$output ..."; \
-		CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH \
-			go build -o "$$output" ./cmd/laterm/; \
+	@mkdir -p $(DIST)
+	@for t in $(TARGETS); do \
+		echo "==> $$t"; \
+		if cargo zigbuild --release --target $$t; then \
+			ext=""; case $$t in *windows*) ext=".exe";; esac; \
+			cp "target/$$t/release/laterm$$ext" "$(DIST)/laterm-$$t$$ext"; \
+			echo "    staged $(DIST)/laterm-$$t$$ext"; \
+		else \
+			echo "    skipped $$t (toolchain unavailable on this host)"; \
+		fi; \
 	done
 
 dequarantine:

@@ -1,13 +1,13 @@
 *.db
 *.o
 *.obj
-*.exe
 *.dylib
 *.dll
 *.so
 *.pdb
 *.a
 *.lib
+*.log
 *.gguf
 *.bin
 *.modulemap
@@ -16,7 +16,8 @@
 build/
 lib/
 bin/
-/laterm
+# rust build output
+target/
 nohup.out
 .DS_Store
 .claude/settings.local.json

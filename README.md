@@ -1,96 +1,148 @@
 # LaTerm
 
-A terminal wrapper that intercepts LaTeX math expressions from a child process and renders them as Sixel graphics or Unicode text, inline in your terminal output.
+A Claude Code sidecar that watches the active conversation log for the current
+project and renders LaTeX math expressions as inline images in a separate
+terminal window.
+
+LaTerm does not wrap or intercept Claude Code. It runs alongside it: you launch
+it in its own graphics-capable terminal window, and it tails the project's
+conversation logs, rendering any math it sees.
 
 ## Requirements and Supported Platforms
 
-- Go 1.26 or later (build from source only)
-- A Unix-like OS (Linux, macOS)
-- A Sixel-capable terminal for high-fidelity rendering (e.g., iTerm2, WezTerm, foot, mlterm); any terminal works with Unicode fallback
+- Rust toolchain (build from source) or a pre-built binary for your platform
+- macOS, Linux, or Windows
+- A terminal that supports an inline-image protocol:
+  - **kitty graphics protocol** — kitty, ghostty (preferred)
+  - **iTerm2 imgcat (OSC 1337)** — iTerm2, WezTerm
+  - **Sixel** — Windows Terminal (v1.22+), xterm, foot, mlterm, WezTerm, and others
+- Claude Code, run from the same project directory
 
-## Quick Start Guide
+LaTerm has full feature parity on Windows, including OSC 11 background-color
+contrast detection. Windows Terminal (v1.22+) is supported via Sixel. WezTerm
+on Windows supports imgcat.
 
-Install the binary directly with Go:
+A terminal supporting none of the three protocols is rejected at startup. There
+is no Unicode text fallback.
 
-```sh
-go install github.com/ave-veritas-et-enodatio/laterm/cmd/laterm@latest
-```
+## Quick Start
 
-Then wrap any command:
-
-```sh
-laterm claude
-```
-
-Math expressions in the output — delimited by `$...$` (inline) or `$$...$$` (block) — are rendered automatically. Everything else passes through unchanged.
-
-## Usage
-
-```
-laterm <command> [args...]
-```
-
-Examples:
+Build from source:
 
 ```sh
-# Wrap an interactive session
-laterm claude
-laterm bash
-
-# Works in non-interactive (piped) mode too
-echo "The answer is $x^2 + 1$" | laterm cat
+git clone https://github.com/ave-veritas-et-enodatio/laterm.git
+cd laterm
+make release
 ```
 
-`laterm` exits with the same exit code as the child process. Signals (Ctrl+C, Ctrl+Z, window resize) are forwarded to the child.
+The binary is written to `target/release/laterm`. Copy or symlink it onto your
+`PATH`.
 
-When stdin is not a TTY (piped mode), `laterm` runs in cooked mode without raw terminal management. PTY and signal forwarding still apply; only raw-mode setup is skipped.
+Open a second terminal window (kitty, ghostty, iTerm2, WezTerm, Windows Terminal,
+or any Sixel-capable terminal), `cd` to the
+same project directory where you run Claude Code, and start:
+
+```sh
+laterm [options]
+```
+
+As Claude Code's conversation produces LaTeX math —
+`$...$` / `\(...\)` (inline) or `$$...$$` / `\[...\]` (display) — LaTerm
+renders each expression as an image in its window, with a little surrounding
+text to anchor it. You can also type or paste an expression directly into the
+LaTerm window to render it on the spot.
+
+## Usage / Options
+
+```
+laterm [--log-file <PATH>] [--catch-up[=<MINS>]] [--help]
+```
+
+| Flag | Description |
+|---|---|
+| `--log-file <PATH>` | Write diagnostics to PATH instead of the default location. |
+| `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
+| `--help`, `-h` | Print usage and exit. |
 
 ## How It Works
 
-`laterm` spawns the target command inside a PTY (pseudo-terminal), acting as a transparent proxy between the child process and your terminal. A byte-level state machine scans the child's output stream for `$` and `$$` delimiters while tracking ANSI escape sequences — a `$` inside an escape sequence is never mistaken for a math delimiter.
+1. From the working directory, LaTerm derives the Claude Code log directory:
+   `~/.claude/projects/<cwd with '/' replaced by '-'>`.
+2. It polls that directory (~500 ms) and tails every `*.jsonl` conversation log.
+   Tail-only: content present at startup is not replayed. Pass `--catch-up` to
+   first replay math from recent history before the tail begins.
+3. For each new entry it extracts the text from user/assistant messages and
+   scans it for LaTeX math.
+4. Each expression is rendered to a PNG by the embedded RaTeX engine and emitted
+   using the terminal's image protocol (kitty, imgcat, or Sixel — in that
+   preference order). If rendering fails, the raw LaTeX is passed through as text.
 
-When a math expression is extracted, it is validated against an allowlist of known-safe LaTeX commands before rendering. If the terminal supports Sixel graphics, the expression is parsed and rendered to an image, then encoded as a Sixel escape sequence. If Sixel is not supported, a Unicode approximation is produced using lookup tables. If rendering fails at any step, the raw LaTeX is passed through as literal text — no output is ever silently dropped.
-
-Post-math text is buffered during rendering so output order is preserved.
+Output is a **sparse feed**: only math expressions plus a short window (≤40
+chars) of the surrounding prose are shown — text with no math produces nothing.
+A small expression (single symbol, simple sub/superscript) renders inline at
+text height; a tall one (fraction, integral, summation) renders as its own
+image block. At startup LaTerm queries the terminal background (OSC 11) and
+renders glyphs in a contrasting color on a transparent background, falling back
+to black-on-white if the query is unanswered. (The Sixel path renders on an
+opaque background of the detected terminal color, since Sixel transparency is
+less universally honored.)
 
 ## Configuration
 
 | Variable | Values | Description |
 |---|---|---|
 | `LATERM_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | Log verbosity. Default: `info`. |
-| `LATERM_LOG_FILE` | File path | Write logs to this file (mode 0600). Default: no file. |
 
-Logs are never written to stdout. Raw child-process content is only logged at `debug` level.
+LaTerm always writes diagnostics to a log file (keeping the rendered terminal
+feed clean). The default path is `laterm.log` beside the executable, falling
+back to the current working directory if the executable path is unavailable.
+Override it with `--log-file <PATH>`. The file is opened for append at mode
+0600 (unix). Only fatal pre-exit messages go to stderr. Raw conversation
+content is only logged at `debug` level.
+
+## Rendering
+
+Math is rendered by [RaTeX](https://github.com/erweixin/RaTeX), a pure-Rust,
+KaTeX-compatible math renderer (MIT license). Pipeline: `parse → layout →
+display list → render_to_png`. KaTeX fonts are embedded in the binary (the
+`embed-fonts` feature) — no external font directory or runtime is required.
+
+RaTeX covers the full KaTeX syntax set: matrices, environments, stretchy
+delimiters, operator-limit stacking (limits above/below), accents (`\hat`,
+`\bar`, `\vec`, …), `\begin`/`\end` environments, and more. Expressions that
+RaTeX cannot parse are passed through as literal text rather than silently
+dropped. There is no command allowlist — RaTeX returns errors rather than
+panicking, so bad input degrades gracefully.
 
 ## Known Limitations
 
-**Terminal escape passthrough.** `laterm` forwards all non-math terminal escape sequences from the child process to your terminal unmodified. A misbehaving child process could emit arbitrary escape sequences. Filtering them would break legitimate terminal functionality, so this is accepted risk.
-
-**SIGKILL and OOM.** If `laterm` is killed by SIGKILL or terminated by OOM, the terminal may be left in raw mode. Run `reset` to recover. This is inherent to any program that puts the terminal in raw mode.
-
-**LaTeX subset only.** The sanitizer accepts a fixed set of LaTeX commands — Greek letters, common operators, fractions, square roots, subscripts, superscripts, accents, font commands (`\mathcal`, `\mathbb`, `\mathrm`, `\text`, `\operatorname`, etc.), and standard delimiters and arrows. Expressions using custom macros, `\begin`/`\end` environments, package imports, or advanced features like `\def` or `\catcode` are rejected and displayed as literal text. This is a deliberate security tradeoff. Some complex expressions that pass the sanitizer may fall back to Unicode rendering if the Sixel renderer cannot handle them; the `|` token in math mode is not yet supported.
-
-**Unicode rendering fidelity.** Unicode math rendering is a best-effort approximation. Complex expressions — matrices, multi-level fractions, deeply nested structures — may not render readably in Unicode mode. Use a Sixel-capable terminal for full fidelity.
+- **Graphics-protocol terminals only.** Requires kitty graphics (kitty,
+  ghostty), iTerm2 imgcat (iTerm2, WezTerm), or Sixel (Windows Terminal v1.22+,
+  xterm, foot, mlterm, WezTerm, and others). Selection order: kitty → imgcat →
+  Sixel. No Unicode fallback; a terminal supporting none is rejected at startup.
+- **Polling latency.** The watcher polls at ~500 ms, so a rendered expression
+  may appear up to that long after it is written.
+- **Background detection is best-effort.** Glyph contrast relies on an OSC 11
+  query; terminals that do not answer (within 200 ms) get a black-on-white
+  fallback rather than theme-matched glyphs.
 
 ## Building from Source
 
-Requires Go 1.26 or later.
+Requires a Rust toolchain (stable).
 
 ```sh
 git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
-make build
+make setup    # install rustup targets (once)
+make build    # debug build
+make release  # optimized build → target/release/laterm
+make test     # run unit tests
+make dist     # cross-build all three release targets into dist/
 ```
 
-The binary is written to `bin/laterm`. Additional make targets:
-
-| Target | Description |
-|---|---|
-| `make build` | Build `bin/laterm` |
-| `make test` | Run unit tests |
-| `make integration-test` | Run integration tests |
-| `make dist` | Build a distribution binary to `dist/laterm-darwin-arm64` |
-| `make dequarantine` | Remove macOS quarantine attribute from the dist binary |
+Plain `cargo build --release` and `cargo test` work too. The root Makefile is
+a thin wrapper over cargo; the Go prototype keeps its own Makefile under
+`prototype/` and is not part of the Rust build.
 
 ## License
 
@@ -100,10 +152,15 @@ The binary is written to `bin/laterm`. Additional make targets:
 
 | Library | Author / Organization | License | Usage |
 |---|---|---|---|
-| [`github.com/creack/pty`](https://github.com/creack/pty) | Thomas Roccia (creack) | MIT | PTY creation and management |
-| [`golang.org/x/term`](https://pkg.go.dev/golang.org/x/term) | Go Authors | BSD-3-Clause | Terminal raw mode, state save/restore, size queries |
-| [`golang.org/x/sys/unix`](https://pkg.go.dev/golang.org/x/sys) | Go Authors | BSD-3-Clause | Terminal pixel dimension queries (TIOCGWINSZ) |
-| [`github.com/mattn/go-sixel`](https://github.com/mattn/go-sixel) | Yasuhiro Matsumoto (mattn) | MIT | Sixel encoding from Go images |
-| [`codeberg.org/go-latex/latex`](https://codeberg.org/go-latex/latex) v0.2.0 (inlined) | Sebastien Binet (sbinet) | BSD-3-Clause | LaTeX parsing and rendering to image; source vendored at `internal/golatex/` with in-repo fixes |
-| [`codeberg.org/go-fonts/*`](https://codeberg.org/go-fonts) | go-latex contributors | OFL-1.1 | Font data consumed by the vendored go-latex font backend |
-| [`golang.org/x/image`](https://pkg.go.dev/golang.org/x/image) | Go Authors | BSD-3-Clause | Image primitives used by the vendored go-latex rendering pipeline |
+| [`ratex-parser`](https://github.com/erweixin/RaTeX) v0.1.9 | erweixin | MIT | KaTeX-compatible LaTeX parser |
+| [`ratex-layout`](https://github.com/erweixin/RaTeX) v0.1.9 | erweixin | MIT | TeX box-model layout engine |
+| [`ratex-render`](https://github.com/erweixin/RaTeX) v0.1.9 (`embed-fonts`) | erweixin | MIT | PNG renderer; `embed-fonts` feature bundles KaTeX fonts into the binary |
+| [`ratex-types`](https://github.com/erweixin/RaTeX) v0.1.9 | erweixin | MIT | Shared type definitions for the RaTeX crate family |
+| [`serde`](https://github.com/serde-rs/serde) v1 | David Tolnay, Erick Tryzelaar | MIT / Apache-2.0 | Derive macros for JSON deserialization |
+| [`serde_json`](https://github.com/serde-rs/json) v1 | David Tolnay, Erick Tryzelaar | MIT / Apache-2.0 | Parsing `.jsonl` conversation log entries |
+| [`base64`](https://github.com/marshallpierce/rust-base64) v0.22 | Marshall Pierce | MIT / Apache-2.0 | Encoding PNG bytes for kitty and imgcat image protocols |
+| [`png`](https://github.com/image-rs/image-png) v0.17 | image-rs contributors | MIT / Apache-2.0 | PNG→RGBA decode for the Sixel encoder |
+| [`chrono`](https://github.com/chronotope/chrono) v0.4 | Chrono Contributors | MIT / Apache-2.0 | RFC3339 timestamp parsing for `--catch-up` window filtering |
+| [`ctrlc`](https://github.com/Detegr/rust-ctrlc) v3 | Antti Ker&#228;nen | MIT / Apache-2.0 | Cross-platform SIGINT/SIGTERM handler |
+| [`libc`](https://github.com/rust-lang/libc) v0.2 | The Rust Project Developers | MIT / Apache-2.0 | Unix-only: termios raw mode and `select(2)` for OSC 11 background query |
+| [`windows-sys`](https://github.com/microsoft/windows-rs) v0.59 | Microsoft | MIT / Apache-2.0 | Windows-only: Console API for OSC 11 background query |

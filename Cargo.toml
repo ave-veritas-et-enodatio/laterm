@@ -1,0 +1,32 @@
+[package]
+name = "laterm"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code sidecar that renders LaTeX math from the conversation log as inline terminal images"
+license = "MIT"
+
+[[bin]]
+name = "laterm"
+path = "src/main.rs"
+
+[dependencies]
+ratex-parser = "0.1.9"
+ratex-layout = "0.1.9"
+ratex-render = { version = "0.1.9", features = ["embed-fonts"] }
+ratex-types = "0.1.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+ctrlc = { version = "3", features = ["termination"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+png = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
