@@ -27,9 +27,20 @@ is no Unicode text fallback.
 
 ## Quick Start
 
-Build from source:
+### Run from dist
 
-```sh
+```bash
+# pick the binary for your platform
+./dist/laterm-laterm-aarch64-apple-darwin
+./dist/laterm-x86_64-pc-windows-gnu.exe
+./dist/laterm-x86_64-unknown-linux-gnu
+```
+
+on Mac: `make dequarantine` first
+
+### Build from source
+
+```bash
 git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
 make release
@@ -43,6 +54,7 @@ or any Sixel-capable terminal), `cd` to the
 same project directory where you run Claude Code, and start:
 
 ```sh
+cd [your-project-dir-where-claude-is-used]
 laterm [options]
 ```
 
