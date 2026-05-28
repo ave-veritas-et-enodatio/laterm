@@ -92,13 +92,17 @@ blocking defect.
 
 **Observability**
 
-9. **Structured, leveled logging.** Always writes to a log file (keeps the
-   rendered feed clean). Default path: `laterm.log` beside the executable,
-   falling back to the current working directory. Override with `--log-file
-   <PATH>`. File opened for append, mode 0600 (unix). **Never writes to
-   stdout.** Only fatal pre-exit messages go to stderr. Level is
-   runtime-configurable via `LATERM_LOG_LEVEL` (debug/info/warn/error; default
-   info).
+9. **Structured, leveled logging (opt-in).** No logging by default. Logging
+   only happens when the user passes `--log <PATH>`. There is no default log
+   path. When enabled, the file is opened for append at mode 0600 (unix) and
+   an exclusive writer lock is held for the process lifetime (unix: advisory
+   `flock(LOCK_EX | LOCK_NB)`; windows: `share_mode(FILE_SHARE_READ)`). A
+   second instance pointed at the same path fails to acquire the lock, prints
+   one warning to stderr, and continues running without logging; read-only
+   access (e.g. `tail -f`) is unaffected. **Never writes to stdout.** Only
+   fatal pre-exit messages go to stderr. Level is runtime-configurable via
+   `LATERM_LOG_LEVEL` (debug/info/warn/error; default info) when logging is
+   enabled.
 
 ---
 
@@ -124,7 +128,7 @@ src/
 ### Module Responsibilities and Constraints
 
 **`main`**
-- Responsibility: Parse CLI flags (`--log-file`, `--catch-up`, `--help`).
+- Responsibility: Parse CLI flags (`--log`, `--catch-up`, `--help`).
   Initialize logging. Derive the Claude Code log directory for the current
   working directory. Select a graphics protocol via `graphics::select` and exit
   immediately (with a clear error) if none of kitty, imgcat, or Sixel is
@@ -278,11 +282,16 @@ src/
 - No dependencies on other laterm modules.
 
 **`logging`**
-- Responsibility: Configure structured, leveled logging. File output at mode
-  0600, append, path resolved by `main` (from `--log-file` or the default
-  beside the executable). Parse and apply log level from `LATERM_LOG_LEVEL`.
-  If the file cannot be opened, prints one warning to stderr and disables
-  logging for the run.
+- Responsibility: Configure structured, leveled logging. Logging is opt-in:
+  path is resolved by `main` from `--log` only (no default). When a path is
+  given, file output at mode 0600, append. Acquires an exclusive writer lock
+  for the process lifetime (unix: advisory `flock(LOCK_EX | LOCK_NB)` via the
+  existing `libc` dependency; windows: `OpenOptions::share_mode(FILE_SHARE_READ)`
+  via std `OpenOptionsExt`). A second instance that fails to acquire the lock
+  prints one warning to stderr and disables logging for that instance; readers
+  (e.g. `tail -f`) are unaffected. Parse and apply log level from
+  `LATERM_LOG_LEVEL`. If the file cannot be opened (permission denied, etc.),
+  prints one warning to stderr and disables logging for the run.
 - Never writes to stdout.
 
 ### Dependency Direction
@@ -324,7 +333,7 @@ crates. `main` uses the `ctrlc` crate for cross-platform signal handling
 | `png` v0.17 | `sixel` | PNG→RGBA8 decode for the Sixel encoder; no sixel or quantization crate is used — the encoder is in-house |
 | `chrono` v0.4 | `main` | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | `ctrlc` v3 | `main` | Cross-platform SIGINT/SIGTERM handler (MIT/Apache-2.0) |
-| `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`) | termios raw mode + `select(2)` for OSC 11 background query |
+| `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`); `logging` (unix only) | termios raw mode + `select(2)` for OSC 11 background query; `flock(LOCK_EX \| LOCK_NB)` for the exclusive log-file writer lock |
 | `windows-sys` v0.59 | `termbg` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`) for OSC 11 background query |
 
 No other external dependencies are permitted without updating this table and
@@ -339,9 +348,9 @@ complete. Organized by component, in implementation priority order.
 
 ### Sidecar startup (Priority 1)
 
-- `laterm` spawns no child process. Accepted flags: `--log-file <PATH>`,
+- `laterm` spawns no child process. Accepted flags: `--log <PATH>`,
   `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`. Unknown flags or a
-  missing `--log-file` argument exit non-zero with a usage message to stderr.
+  missing/empty `--log` argument exit non-zero with a usage message to stderr.
 - If the terminal supports none of kitty, imgcat, or Sixel (`graphics::select`
   returns `None`), laterm prints a clear error to stderr and exits non-zero
   immediately. No further work is done.
@@ -434,11 +443,14 @@ complete. Organized by component, in implementation priority order.
 
 - Nothing appears on stdout except verbatim conversation text and
   graphics-protocol escape sequences (kitty, imgcat, or Sixel).
-- Log output always goes to a file (mode 0600, append). Default path:
-  `laterm.log` beside the executable (falls back to cwd). Overridden by
-  `--log-file <PATH>`. If the file cannot be opened, one warning goes to stderr
-  and logging is disabled for the run.
-- Log level is configurable via `LATERM_LOG_LEVEL` (debug, info, warn, error).
+- No logging unless `--log <PATH>` is given (no default path). When enabled:
+  mode-0600 append, exclusive writer lock held for the process lifetime. A
+  second instance pointed at the same path fails to acquire the lock, prints
+  one warning to stderr, and continues without logging; readers (e.g. `tail -f`)
+  are unaffected. If the file cannot be opened, one warning goes to stderr and
+  logging is disabled for the run.
+- Log level is configurable via `LATERM_LOG_LEVEL` (debug, info, warn, error)
+  when logging is enabled.
 - `--catch-up[=<MINS>]`: before the tail starts, all `*.jsonl` files in the
   log directory are scanned; entries whose RFC3339 `timestamp` is at or after
   `now - MINS minutes` are collected, sorted by timestamp, and rendered in

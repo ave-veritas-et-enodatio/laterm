@@ -21,7 +21,6 @@ use ratex_types::color::Color;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
-const LOG_FILE_NAME: &str = "laterm.log";
 const DEFAULT_CATCH_UP_MINUTES: i64 = 5;
 
 const USAGE: &str = "\
@@ -31,15 +30,14 @@ Renders LaTeX math from the current Claude Code conversation log as inline
 terminal images.
 
 options:
-  --log-file <PATH>     write diagnostics to PATH (default: laterm.log beside
-                        the executable)
+  --log <PATH>          write diagnostics to PATH (default: no logging)
   --catch-up[=<MINS>]   render math from the last MINS minutes of history
                         before tailing (bare flag = 5 minutes)
   --help                show this help and exit
 ";
 
 struct Args {
-    log_file: Option<PathBuf>,
+    log: Option<PathBuf>,
     catch_up: Option<i64>,
 }
 
@@ -47,7 +45,7 @@ struct Args {
 /// the caller is expected to print usage. On error returns Err with a message.
 fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
     let mut args = Args {
-        log_file: None,
+        log: None,
         catch_up: None,
     };
     let mut it = argv.into_iter();
@@ -55,11 +53,14 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, St
     while let Some(arg) = it.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(None);
-        } else if arg == "--log-file" {
-            let path = it.next().ok_or("--log-file requires a path argument")?;
-            args.log_file = Some(PathBuf::from(path));
-        } else if let Some(path) = arg.strip_prefix("--log-file=") {
-            args.log_file = Some(PathBuf::from(path));
+        } else if arg == "--log" {
+            let path = it.next().ok_or("--log requires a path argument")?;
+            args.log = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--log=") {
+            if path.is_empty() {
+                return Err("--log requires a path argument".to_string());
+            }
+            args.log = Some(PathBuf::from(path));
         } else if arg == "--catch-up" {
             args.catch_up = Some(DEFAULT_CATCH_UP_MINUTES);
         } else if let Some(mins) = arg.strip_prefix("--catch-up=") {
@@ -95,7 +96,11 @@ fn run() -> i32 {
         }
     };
 
-    logging::init(&resolve_log_path(args.log_file), logging::level_from_env());
+    // No logging by default — opt in with `--log <PATH>`. Avoids multiple
+    // instances clobbering one shared default file; enable it for diagnostics.
+    if let Some(path) = &args.log {
+        logging::init(path, logging::level_from_env());
+    }
 
     // Select graphics protocol first — hard gate.
     let proto = match graphics::select() {
@@ -520,21 +525,6 @@ fn rows_for(height_px: u32, ref_px: u32) -> u32 {
     ((height_px as f32 / ref_px as f32 * ROW_SCALE).round() as u32).max(1)
 }
 
-/// Resolve the log file path: an explicit `--log-file` wins; otherwise
-/// `laterm.log` beside the executable, falling back to the cwd if the
-/// executable directory is unavailable.
-fn resolve_log_path(override_path: Option<PathBuf>) -> PathBuf {
-    if let Some(p) = override_path {
-        return p;
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-    {
-        return dir.join(LOG_FILE_NAME);
-    }
-    PathBuf::from(LOG_FILE_NAME)
-}
 
 /// Render math from conversation entries timestamped within the last `minutes`,
 /// across every *.jsonl file in `dir`, in timestamp order. Runs on the main
@@ -640,7 +630,7 @@ mod tests {
     #[test]
     fn no_args_defaults() {
         let a = parse_args(argv(&[])).unwrap().unwrap();
-        assert!(a.log_file.is_none());
+        assert!(a.log.is_none());
         assert!(a.catch_up.is_none());
     }
 
@@ -650,15 +640,11 @@ mod tests {
     }
 
     #[test]
-    fn log_file_space_and_equals_forms() {
-        let a = parse_args(argv(&["--log-file", "/tmp/x.log"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(a.log_file, Some(PathBuf::from("/tmp/x.log")));
-        let b = parse_args(argv(&["--log-file=/tmp/y.log"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(b.log_file, Some(PathBuf::from("/tmp/y.log")));
+    fn log_space_and_equals_forms() {
+        let a = parse_args(argv(&["--log", "/tmp/x.log"])).unwrap().unwrap();
+        assert_eq!(a.log, Some(PathBuf::from("/tmp/x.log")));
+        let b = parse_args(argv(&["--log=/tmp/y.log"])).unwrap().unwrap();
+        assert_eq!(b.log, Some(PathBuf::from("/tmp/y.log")));
     }
 
     #[test]
@@ -672,7 +658,8 @@ mod tests {
     #[test]
     fn errors() {
         assert!(parse_args(argv(&["--nope"])).is_err());
-        assert!(parse_args(argv(&["--log-file"])).is_err());
+        assert!(parse_args(argv(&["--log"])).is_err());
+        assert!(parse_args(argv(&["--log="])).is_err());
         assert!(parse_args(argv(&["--catch-up=abc"])).is_err());
         assert!(parse_args(argv(&["--catch-up=-3"])).is_err());
     }
