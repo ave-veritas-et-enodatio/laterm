@@ -152,12 +152,17 @@ src/
   `ESC[200~` … `ESC[201~` and processed through the same conversation path —
   prose mirrored verbatim, delimited math rendered in place (inline vs block by
   height, proportional `rows` sizing). Multi-line pastes are handled as one
-  entry. Typed printable keystrokes produce a throttled terminal BEL (`\x07`, at
-  most ~once per 250 ms); escape sequences and control bytes are consumed
+  entry. Pressing Enter/Return writes a visual separator to stdout: a blank line,
+  then a terminal-width rule of `=` characters (width from `termbg::term_width()`,
+  falling back to 80 columns), then a newline. Debounce: if the last output was
+  already a manual separator, Enter beeps instead of stacking a second rule; any
+  subsequently rendered content (a conversation entry or a paste) re-arms the
+  separator. Typed printable keystrokes produce a throttled terminal BEL (`\x07`,
+  at most ~once per 250 ms); escape sequences and control bytes are consumed
   silently. Typed input is never rendered. Ctrl-C still fires SIGINT (`ISIG`
   preserved). A shared output mutex keeps conversation and manual renders from
-  interleaving. Only `main` writes to stdout (bracketed-paste toggles and BEL
-  included).
+  interleaving. Only `main` writes to stdout (bracketed-paste toggles, separator
+  rules, and BEL included).
 - Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
   absolute working directory path is replaced by `-`.
 - Must NOT contain: rendering logic, parsing logic, or sanitization logic.
@@ -269,6 +274,10 @@ src/
   `raw_input() -> Option<RawInput>` opens a persistent raw-input mode for
   `main`'s read side (echo OFF, canonical mode OFF, `ISIG` preserved so Ctrl-C
   still fires SIGINT). RAII: the prior terminal mode is restored on drop.
+  `term_width() -> usize` returns the current terminal width in columns, or 80
+  when it cannot be determined. Unix: `ioctl(STDOUT_FILENO, TIOCGWINSZ)` via
+  `libc`. Windows: `GetConsoleScreenBufferInfo` on the stdout handle via
+  `windows-sys`. No new dependencies — both crates are already used by `termbg`.
   Platform implementations:
   - **unix** — operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN` in
     `c_lflag` (keeps `OPOST` so `\n`→`\r\n` translation on the output side is
@@ -333,8 +342,8 @@ crates. `main` uses the `ctrlc` crate for cross-platform signal handling
 | `png` v0.17 | `sixel` | PNG→RGBA8 decode for the Sixel encoder; no sixel or quantization crate is used — the encoder is in-house |
 | `chrono` v0.4 | `main` | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | `ctrlc` v3 | `main` | Cross-platform SIGINT/SIGTERM handler (MIT/Apache-2.0) |
-| `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`); `logging` (unix only) | termios raw mode + `select(2)` for OSC 11 background query; `flock(LOCK_EX \| LOCK_NB)` for the exclusive log-file writer lock |
-| `windows-sys` v0.59 | `termbg` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`) for OSC 11 background query |
+| `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`); `logging` (unix only) | termios raw mode + `select(2)` for OSC 11 background query; `ioctl(TIOCGWINSZ)` for terminal width; `flock(LOCK_EX \| LOCK_NB)` for the exclusive log-file writer lock |
+| `windows-sys` v0.59 | `termbg` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`) for OSC 11 background query; `GetConsoleScreenBufferInfo` for terminal width |
 
 No other external dependencies are permitted without updating this table and
 providing justification.
@@ -369,10 +378,14 @@ complete. Organized by component, in implementation priority order.
   (`ESC[?2004h`) at startup and disabled (`ESC[?2004l`) on exit. Text pasted
   into the window is captured silently between the bracketed-paste markers and
   rendered through the same path as a conversation entry (full echo: prose
-  verbatim, delimited math rendered in place). Typed printable keystrokes produce
-  a throttled BEL (`\x07`, at most ~once per 250 ms); escape sequences and
-  control bytes are consumed silently. There is no bare-expression rendering for
-  undelimited typed input — that behavior is removed.
+  verbatim, delimited math rendered in place). Pressing Enter/Return writes a
+  separator to stdout: a blank line, a terminal-width rule of `=` characters
+  (width via `termbg::term_width()`, default 80), and a newline. If the last
+  output was already a manual separator, Enter beeps instead (no stacked rules);
+  any rendered content re-arms it. Typed printable keystrokes produce a throttled
+  BEL (`\x07`, at most ~once per 250 ms); escape sequences and control bytes are
+  consumed silently. There is no bare-expression rendering for undelimited typed
+  input — that behavior is removed.
 
 ### File watcher (Priority 1)
 
