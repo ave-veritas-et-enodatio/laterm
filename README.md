@@ -8,6 +8,8 @@ LaTerm does not wrap or intercept Claude Code. It runs alongside it: you launch
 it in its own graphics-capable terminal window, and it tails the project's
 conversation logs, rendering any math it sees.
 
+![screenshot](screenshot.png)
+
 ## Requirements and Supported Platforms
 
 - Rust toolchain (build from source) or a pre-built binary for your platform
