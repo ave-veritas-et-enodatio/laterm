@@ -23,11 +23,11 @@ laterm [--log-file <PATH>] [--catch-up[=<MINS>]] [--help]
 ```
 
 It spawns no child process. It derives the Claude Code log directory, tails
-every `*.jsonl` conversation log, and for each new entry emits a sparse feed
-to stdout: only each math expression rendered as an inline image, plus the
-limited surrounding anchor text needed to contextualize it. Pass `--catch-up`
-to first replay math from recent history before tailing begins. It also renders
-expressions typed or pasted directly into its window.
+every `*.jsonl` conversation log, and for each new entry echoes the full
+conversation text to stdout with all LaTeX math expressions rendered as inline
+images in place. Pass `--catch-up` to first replay recent history before
+tailing begins. It also renders expressions typed or pasted directly into its
+window.
 
 Crate name: `laterm`. Source root: `src/`.
 
@@ -69,7 +69,7 @@ src/
   main.rs      CLI entry point. Wires all modules. No child process.
   watch.rs     Polling tailer. *.jsonl files, tail-only, partial-line buffering.
   convo.rs     jsonl parser. Extracts text from user/assistant entries.
-  mathscan.rs  LaTeX delimiter scanner. Returns Vec<Unit{before, segments, after}>.
+  mathscan.rs  LaTeX delimiter scanner. Returns flat Vec<Segment>, document order.
   render.rs    PNG renderer. RaTeX parse→layout→display list→PNG pipeline.
   graphics.rs  Protocol selection: kitty (preferred), imgcat, or sixel.
   kitty.rs     kitty graphics protocol encoder. supported() detection.
@@ -86,19 +86,22 @@ src/
 current working directory (`~/.claude/projects/<cwd-with-slashes-as-dashes>`).
 Select a graphics protocol via `graphics::select` and exit immediately with an
 error if none of kitty, imgcat, or Sixel is supported. Detect the terminal background
-(`termbg::query`) and configure the renderer theme. Compute the block-height
-threshold once (1.5× a reference render). If `--catch-up` was given, replay
+(`termbg::query`) and configure the renderer theme. Render a reference capital
+"X" once (`render::render("X", false)`, default 42 px if it fails); this value
+drives both the block threshold (1.5×) and the proportional row count for every
+image. If `--catch-up` was given, replay
 math from conversation entries timestamped within the last N minutes (across
 all `*.jsonl`, chronological order) before starting the tailer. Start the watch
-loop. For each line, call `convo::extract` → `mathscan::scan`; for each `Unit`,
-write its `before`/`after` anchor lines and walk its segments in order: text
-inline, math rendered via `render::render` and emitted via the selected
-protocol's `encode` (block, own line) when the rendered height ≥ the threshold,
-else `encode_inline` (one text row). Handle SIGINT/SIGTERM. Also reads stdin
-(line mode): each typed/pasted line is rendered through the same path —
-delimited math like conversation text, an undelimited line as one bare LaTeX
-expression. A shared output mutex keeps conversation and manual renders from
-interleaving. Contains no rendering, parsing, or protocol logic. Only this
+loop. For each line, call `convo::extract` → `mathscan::scan`; walk the flat
+segment list in order: text segments echoed verbatim (newlines preserved), math
+segments rendered via `render::render`, then `rows = max(1, round(height_px /
+reference_X_height_px × 1.25))` computed and `proto.encode(png, rows)` called for
+every image (`1.25` = `ROW_SCALE`, a legibility bump). Height ≥ 1.5× reference → block layout (newline + image +
+newline); otherwise inline (in flow). Handle SIGINT/SIGTERM. Also
+reads stdin (line mode): each typed/pasted line is rendered through the same
+path — delimited math like conversation text, an undelimited line as one bare
+LaTeX expression. A shared output mutex keeps conversation and manual renders
+from interleaving. Contains no rendering, parsing, or protocol logic. Only this
 module writes to stdout.
 
 **`watch`** — Polls `dir` at `interval` for `*.jsonl` files. Tail-only:
@@ -114,20 +117,17 @@ signalled. No laterm module imports.
 item). Returns None/empty for all other cases, including parse failure. Never
 panics. Uses `serde_json`.
 
-**`mathscan`** — `scan(text: &str) -> Vec<Unit>`. Returns one
-`Unit{before, segments, after}` per math-bearing line. `segments` interleaves
-`Segment{kind: Text}` and `Segment{kind: Math}` in document order (for `Math`,
-the field holds the inner expression and a `display: bool` for block vs
-inline). All context is bounded to ≤40 runes (word-snapped, ellipsis). The
-line's own leading/trailing text is trimmed so a long sentence does not echo in
-full. `before`/`after` add the nearest prose from adjacent non-math lines
-(crossing blank lines) only on a side with no same-line text — a display block
-alone on its line reads in context; an inline formula in a sentence is anchored
-by its own line. Delimiters: `$$...$$`/`\[...\]` (display); `$...$`/`\(...\)`
-(inline). `\$` is a literal dollar. Unterminated/empty spans become literal
-text. Multi-line display blocks supported. Two expressions on one line stay in
-a single unit (no duplication). No-math lines are dropped. Returns empty vec if
-no math. No laterm module imports.
+**`mathscan`** — `scan(text: &str) -> Vec<Segment>`. Returns the full input as
+a flat, document-order interleaving of `Text(String)` and
+`Math { expr: String, display: bool }` segments, with newlines preserved. No
+trimming, no anchor windowing, no neighbor-context logic — every character of
+the input appears in exactly one segment. Delimiters: `$$...$$`/`\[...\]`
+(display); `$...$`/`\(...\)` (inline). `\$` is a literal dollar. Unterminated
+and empty spans become literal text. Multi-line display blocks supported. Two
+expressions on one line appear as two `Math` segments in order, interleaved
+with the text between them. Text on lines with no math is emitted verbatim as
+`Text` segments — nothing is dropped. Returns an empty vec only for empty
+input. No laterm module imports.
 
 **`render`** — Runs the RaTeX pipeline: `ratex_parser::parse` →
 `ratex_layout::layout` + `to_display_list` → `ratex_render::render_to_png`.
@@ -146,17 +146,18 @@ then imgcat (env-based), then Sixel (DA1 tty round-trip — probed last). Return
 `sixel`.
 
 **`kitty`** — `supported() -> bool` (checks `KITTY_WINDOW_ID`, `TERM`
-containing `kitty`/`ghostty`, `TERM_PROGRAM == "ghostty"`). `encode`/
-`encode_inline` emit the kitty graphics protocol: PNG (`f=100`) in ≤4096-byte
-base64 chunks via `\x1b_G…\x1b\\` APC escapes (`a=T`); inline adds `r=1`.
-Uses `base64` crate. No laterm module imports.
+containing `kitty`/`ghostty`, `TERM_PROGRAM == "ghostty"`).
+`encode(png: &[u8], rows: u32)` emits the kitty graphics protocol: PNG
+(`f=100`) in ≤4096-byte base64 chunks via `\x1b_G…\x1b\\` APC escapes,
+with `a=T,f=100,r=<rows>` — `rows` is always present and is the proportional
+row count from `main`. Uses `base64` crate. No laterm module imports.
 
 **`imgcat`** — `supported() -> bool` (checks `TERM_PROGRAM == "iTerm.app"`,
-`LC_TERMINAL == "iTerm2"`, `TERM_PROGRAM == "WezTerm"`). `encode(png: &[u8])
--> Vec<u8>` wraps in `ESC ] 1337 ; File=inline=1;size=<len>:<base64> BEL` at
-native size; `encode_inline(png: &[u8]) -> Vec<u8>` adds
-`height=1;preserveAspectRatio=1`. Uses `base64` crate. Does not write to
-stdout. No laterm module imports.
+`LC_TERMINAL == "iTerm2"`, `TERM_PROGRAM == "WezTerm"`).
+`encode(png: &[u8], rows: u32) -> Vec<u8>` emits
+`ESC ] 1337 ; File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64> BEL`,
+where `rows` is the proportional terminal-cell row count from `main`.
+Uses `base64` crate. Does not write to stdout. No laterm module imports.
 
 **`sixel`** — `supported() -> bool` sends a DA1 query (`\x1b[c`) via
 `termbg::query_terminal` and parses the `\x1b[?<attrs>c` reply with `parse_da1`;
@@ -166,8 +167,9 @@ Terminal. `encode(png: &[u8]) -> Vec<u8>` decodes the PNG to RGBA8 with the
 `png` crate, then emits a standard Sixel stream: DCS introducer + 1:1 raster
 attributes, RGB color registers (0–100 scale), 6-row bands with RLE.  Colors
 are collected directly from pixels (bit-dropping loop to cap at 256 registers) —
-no quantization crate. `encode_inline` is identical to `encode` (Sixel has no
-cell-scaling equivalent to kitty's `r=1`). Uses an opaque background for renders
+no quantization crate. `encode(png: &[u8], rows: u32)`: the `rows` parameter is
+currently **ignored** — Sixel has no cell-based row scaling, so the image renders
+at its native pixel size (known limitation). Uses an opaque background for renders
 (terminal color or white) rather than the transparent path kitty/imgcat use.
 
 **`termbg`** — `query(timeout: Duration) -> Option<(u8, u8, u8)>` sends OSC 11
@@ -249,13 +251,24 @@ use, because Sixel transparency is less universally honored.
 
 ### Inline vs block layout is decided by rendered height
 
-`main` renders a reference capital letter once at startup and treats any
-expression whose rendered height is ≥ 1.5× that as a block: newline +
-`proto.encode(png)` + newline, on its own line at full size. Shorter expressions
-use `proto.encode_inline`, staying in the text flow. For Sixel, `encode_inline`
-is identical to `encode` (no cell-scaling equivalent). The threshold is computed
-at runtime so it tracks RaTeX's actual output rather than a hard-coded pixel
-count.
+`main` renders a reference capital "X" once at startup (`render::render("X",
+false)`, default 42 px if it fails). This single reference value drives two
+independent decisions:
+
+1. **Layout** — expressions whose height is ≥ 1.5× the reference are laid out
+   as **block** (newline + image + newline, on its own line). Shorter
+   expressions stay **inline** (in the text flow).
+2. **Size** — for every image, regardless of layout,
+   `rows = max(1, round(png_height_px / reference_X_height_px × 1.25))` is passed
+   to `proto.encode(png, rows)`, so displayed height scales proportionally to the
+   terminal's text size. The `1.25` factor (`ROW_SCALE`) is a legibility bump so
+   math reads at the prose's full line height rather than just cap-height.
+
+Both layouts call the same `encode(png, rows)` — there is no separate
+`encode_inline` method. For Sixel, `rows` is currently ignored and the image
+renders at its native pixel size. The threshold and proportional rows are both
+computed at runtime from the same reference render, so they track RaTeX's actual
+output rather than hard-coded pixel counts.
 
 ---
 
@@ -370,10 +383,12 @@ The process never exits due to a render failure.
 ### Prototype under `prototype/`
 
 The Go prototype under `prototype/` is the validated reference implementation.
-It is kept for its behavioral specification value (the mathscan windowing logic,
-kitty/imgcat escape sequences, OSC 11 query mechanics) — read it when behavior
-details are unclear. Do not modify it when working on the Rust implementation.
-It is not part of the Rust build.
+It is kept for its behavioral specification value (kitty/imgcat escape
+sequences, OSC 11 query mechanics, watch/tail logic) — read it when behavior
+details for those areas are unclear. The Rust mathscan diverges from the
+prototype: it echoes full transcripts rather than sparse anchor windows. Do not
+modify the prototype when working on the Rust implementation. It is not part of
+the Rust build.
 
 ---
 

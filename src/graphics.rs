@@ -12,19 +12,14 @@ const CHUNK_SIZE: usize = 4096;
 /// A selected terminal image protocol.
 pub struct Protocol {
     pub name: &'static str,
-    encode_fn: fn(&[u8]) -> Vec<u8>,
-    encode_inline_fn: fn(&[u8]) -> Vec<u8>,
+    encode_fn: fn(&[u8], u32) -> Vec<u8>,
 }
 
 impl Protocol {
-    /// Encode PNG at native size (block use: own line).
-    pub fn encode(&self, png: &[u8]) -> Vec<u8> {
-        (self.encode_fn)(png)
-    }
-
-    /// Encode PNG scaled to one text row (inline use).
-    pub fn encode_inline(&self, png: &[u8]) -> Vec<u8> {
-        (self.encode_inline_fn)(png)
+    /// Encode PNG scaled to `rows` text rows (cells). Layout (own line vs in
+    /// text flow) is the caller's decision; the encoder only needs the height.
+    pub fn encode(&self, png: &[u8], rows: u32) -> Vec<u8> {
+        (self.encode_fn)(png, rows)
     }
 }
 
@@ -36,21 +31,18 @@ pub fn select() -> Option<Protocol> {
         return Some(Protocol {
             name: "kitty",
             encode_fn: kitty_encode,
-            encode_inline_fn: kitty_encode_inline,
         });
     }
     if imgcat_supported() {
         return Some(Protocol {
             name: "imgcat",
             encode_fn: imgcat_encode,
-            encode_inline_fn: imgcat_encode_inline,
         });
     }
     if sixel::supported() {
         return Some(Protocol {
             name: "sixel",
             encode_fn: sixel::encode,
-            encode_inline_fn: sixel::encode_inline,
         });
     }
     None
@@ -79,16 +71,9 @@ where
     false
 }
 
-fn kitty_encode(png: &[u8]) -> Vec<u8> {
-    kitty_encode_impl(png, "")
-}
-
-fn kitty_encode_inline(png: &[u8]) -> Vec<u8> {
-    kitty_encode_impl(png, ",r=1")
-}
-
-fn kitty_encode_impl(png: &[u8], size_args: &str) -> Vec<u8> {
+fn kitty_encode(png: &[u8], rows: u32) -> Vec<u8> {
     let b64 = BASE64.encode(png);
+    let size_args = format!(",r={rows}");
     let b64_bytes = b64.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b64_bytes.len() + 64);
     let mut first = true;
@@ -137,17 +122,13 @@ where
     false
 }
 
-fn imgcat_encode(png: &[u8]) -> Vec<u8> {
-    imgcat_encode_impl(png, "")
-}
-
-fn imgcat_encode_inline(png: &[u8]) -> Vec<u8> {
-    imgcat_encode_impl(png, "height=1;preserveAspectRatio=1;")
-}
-
-fn imgcat_encode_impl(png: &[u8], extra_args: &str) -> Vec<u8> {
+fn imgcat_encode(png: &[u8], rows: u32) -> Vec<u8> {
     let b64 = BASE64.encode(png);
-    format!("\x1b]1337;File=inline=1;{extra_args}size={}:{b64}\x07", png.len()).into_bytes()
+    format!(
+        "\x1b]1337;File=inline=1;height={rows};preserveAspectRatio=1;size={}:{b64}\x07",
+        png.len()
+    )
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -220,9 +201,9 @@ mod tests {
     fn kitty_encode_structure_and_roundtrip() {
         // Larger than CHUNK_SIZE to exercise multi-chunk encoding.
         let payload: Vec<u8> = (0..CHUNK_SIZE * 2 + 17).map(|i| i as u8).collect();
-        let out = kitty_encode(&payload);
+        let out = kitty_encode(&payload, 1);
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,m="), "output does not start with graphics control prefix");
+        assert!(s.starts_with("\x1b_Ga=T,f=100,r=1,m="), "output does not start with graphics control prefix");
         assert!(s.ends_with("\x1b\\"), "output does not end with ST");
         assert!(s.contains("m=0"), "output missing final m=0 chunk");
         let decoded = decode_kitty_payload(&out);
@@ -230,10 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn kitty_encode_inline_has_row_arg() {
-        let out = kitty_encode_inline(b"hello");
+    fn kitty_encode_has_row_arg() {
+        let out = kitty_encode(b"hello", 3);
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,r=1,m="), "inline output missing r=1 size arg: {s:?}");
+        assert!(s.starts_with("\x1b_Ga=T,f=100,r=3,m="), "output missing r=3 size arg: {s:?}");
     }
 
     // ---- imgcat tests ----
@@ -266,13 +247,14 @@ mod tests {
     #[test]
     fn imgcat_encode_structure_and_roundtrip() {
         let input = b"fake-png-data-for-testing";
-        let out = imgcat_encode(input);
+        let out = imgcat_encode(input, 3);
         assert!(out.starts_with(b"\x1b]1337;File="), "output does not start with OSC 1337");
         assert_eq!(out.last(), Some(&b'\x07'), "output does not end with BEL");
 
         let size_tag = format!("size={}", input.len());
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains(&size_tag), "output missing {size_tag}");
+        assert!(s.contains("height=3;preserveAspectRatio=1;"), "output missing height/aspect args: {s:?}");
 
         // Decode base64 after last ':' before BEL.
         let colon = s.rfind(':').expect("no ':' in output");

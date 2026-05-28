@@ -90,7 +90,11 @@ fn parse_da1(reply: &str) -> bool {
 /// Returns an empty vector if the PNG cannot be decoded or encoded; callers
 /// already pass raw LaTeX through on render failure, so a no-op write is the
 /// safe degradation here.
-pub fn encode(png: &[u8]) -> Vec<u8> {
+///
+/// `rows` (cell-based row scaling) is currently ignored: SIXEL has no
+/// cell-based scaling, so images render at native pixel size. Row-scaling for
+/// sixel is not yet implemented.
+pub fn encode(png: &[u8], _rows: u32) -> Vec<u8> {
     let (rgba, width, height) = match decode_rgba(png) {
         Some(t) => t,
         None => return Vec::new(),
@@ -244,13 +248,6 @@ fn flush_run(out: &mut Vec<u8>, ch: u8, n: usize) {
     }
 }
 
-/// SIXEL has no cell-based scaling (unlike kitty `r=1` / imgcat `height=1`), so
-/// inline rendering is just native-size encoding — small expressions are
-/// already small.
-pub fn encode_inline(png: &[u8]) -> Vec<u8> {
-    encode(png)
-}
-
 /// Decode a PNG to 8-bit RGBA, normalizing any input color type/depth.
 fn decode_rgba(png: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
     let mut decoder = png::Decoder::new(png);
@@ -313,7 +310,7 @@ mod tests {
     #[test]
     fn encode_smoke() {
         let png = tiny_png();
-        let sixel = encode(&png);
+        let sixel = encode(&png, 1);
         assert!(sixel.starts_with(b"\x1bP"), "sixel must start with DCS introducer");
         assert!(sixel.ends_with(b"\x1b\\"), "sixel must end with ST");
     }
