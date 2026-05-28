@@ -37,7 +37,7 @@ blocking defect.
 
 3. **Read-only source.** laterm never writes to, modifies, or interferes with
    the Claude Code process or its log files. Its inputs are the `*.jsonl`
-   conversation entries and its own stdin (manually typed/pasted expressions);
+   conversation entries and its own stdin (manually pasted text);
    it never writes back to either source.
 
 4. **Tail-only, no replay.** At startup, each existing `*.jsonl` file's current
@@ -141,10 +141,19 @@ src/
   computed, and the image emitted via `proto.encode(png, rows)`. Height ≥
   1.5× reference → block layout (newline + image + newline); otherwise inline
   (in flow). Handle SIGINT/SIGTERM to stop the watch loop cleanly.
-- Manual input: also reads stdin (line mode) and renders each typed or pasted
-  line through the same path; a line with no delimited math is treated as one
-  bare LaTeX expression. A shared output mutex keeps conversation and manual
-  renders from interleaving mid-image.
+- Manual input: also reads stdin in raw mode via `termbg::raw_input()` (echo
+  OFF, canonical mode OFF). Enables bracketed paste (`ESC[?2004h`) on entry and
+  disables it (`ESC[?2004l`) on exit, restoring the prior terminal mode via RAII.
+  Pasted text is captured silently between the bracketed-paste markers
+  `ESC[200~` … `ESC[201~` and processed through the same conversation path —
+  prose mirrored verbatim, delimited math rendered in place (inline vs block by
+  height, proportional `rows` sizing). Multi-line pastes are handled as one
+  entry. Typed printable keystrokes produce a throttled terminal BEL (`\x07`, at
+  most ~once per 250 ms); escape sequences and control bytes are consumed
+  silently. Typed input is never rendered. Ctrl-C still fires SIGINT (`ISIG`
+  preserved). A shared output mutex keeps conversation and manual renders from
+  interleaving. Only `main` writes to stdout (bracketed-paste toggles and BEL
+  included).
 - Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
   absolute working directory path is replaced by `-`.
 - Must NOT contain: rendering logic, parsing logic, or sanitization logic.
@@ -253,12 +262,18 @@ src/
   are platform-independent. `query_terminal(request, timeout) -> Option<String>`
   is a shared helper used by both the OSC 11 query and `sixel`'s DA1 probe —
   it sends an arbitrary terminal request in raw mode and returns the reply.
+  `raw_input() -> Option<RawInput>` opens a persistent raw-input mode for
+  `main`'s read side (echo OFF, canonical mode OFF, `ISIG` preserved so Ctrl-C
+  still fires SIGINT). RAII: the prior terminal mode is restored on drop.
   Platform implementations:
-  - **unix** — opens `/dev/tty`, uses the `libc` crate for termios raw mode
-    (`cfmakeraw`/`tcsetattr`) and `select(2)` for the read timeout.
-  - **Windows** — uses the `windows-sys` crate's Console API:
-    `GetStdHandle`, `SetConsoleMode` with `ENABLE_VIRTUAL_TERMINAL_INPUT`,
-    `WaitForSingleObject` for the timeout, `ReadConsoleA` for the reply.
+  - **unix** — operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN` in
+    `c_lflag` (keeps `OPOST` so `\n`→`\r\n` translation on the output side is
+    unaffected); sets `VMIN=0 / VTIME=1`; a timed `read()` returns `Some(0)` on
+    timeout (keep polling) and `None` on error/EOF. Uses the `libc` crate.
+  - **Windows** — operates on conin; clears `ENABLE_LINE_INPUT |
+    ENABLE_ECHO_INPUT`, sets `ENABLE_VIRTUAL_TERMINAL_INPUT` so bracketed-paste
+    VT sequences arrive; leaves output mode untouched; timed read via
+    `WaitForSingleObject` / `ReadConsoleA`. Uses the `windows-sys` crate.
     Windows is not a stub — it has full OSC 11 parity.
 - No dependencies on other laterm modules.
 
@@ -340,9 +355,15 @@ complete. Organized by component, in implementation priority order.
 - If the derived log directory does not yet exist, laterm waits (polling
   continues) rather than exiting.
 - SIGINT and SIGTERM stop the poll loop and cause laterm to exit 0.
-- Manual input: a line typed or pasted into the window is rendered. A line with
-  delimited math is treated like conversation text; a line with no delimiters is
-  rendered as one bare LaTeX expression. Empty lines are ignored.
+- Manual input: stdin is placed in raw mode via `termbg::raw_input()` (echo
+  OFF, canonical mode OFF, `ISIG` preserved). Bracketed paste is enabled
+  (`ESC[?2004h`) at startup and disabled (`ESC[?2004l`) on exit. Text pasted
+  into the window is captured silently between the bracketed-paste markers and
+  rendered through the same path as a conversation entry (full echo: prose
+  verbatim, delimited math rendered in place). Typed printable keystrokes produce
+  a throttled BEL (`\x07`, at most ~once per 250 ms); escape sequences and
+  control bytes are consumed silently. There is no bare-expression rendering for
+  undelimited typed input — that behavior is removed.
 
 ### File watcher (Priority 1)
 

@@ -64,8 +64,9 @@ laterm [options]
 As Claude Code's conversation produces LaTeX math —
 `$...$` / `\(...\)` (inline) or `$$...$$` / `\[...\]` (display) — LaTerm
 echoes the conversation text in its window, rendering each expression as an
-image in place. You can also type or paste an expression directly into the
-LaTerm window to render it on the spot.
+image in place. You can also paste text (e.g. a snippet containing math) directly
+into the LaTerm window; it is rendered like a conversation entry. Typed input is
+not accepted — ordinary keystrokes produce a beep.
 
 ## Usage / Options
 

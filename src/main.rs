@@ -11,10 +11,10 @@ mod sixel;
 mod termbg;
 mod watch;
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use ratex_types::color::Color;
@@ -173,66 +173,233 @@ fn run() -> i32 {
         }
         for seg in convo::extract(&line.data) {
             let _lock = out_mu.lock().unwrap();
-            emit_text(&seg.text, block_threshold, ref_height, false, &proto);
+            emit_text(&seg.text, block_threshold, ref_height, &proto);
         }
     }
 
     0
 }
 
+/// Enable bracketed paste (only `main` writes stdout).
+const PASTE_ON: &[u8] = b"\x1b[?2004h";
+/// Disable bracketed paste.
+const PASTE_OFF: &[u8] = b"\x1b[?2004l";
+/// Terminal bell signalling rejected (typed) input.
+const BEL: &[u8] = b"\x07";
+/// Minimum gap between BEL beeps so a held key / typed sentence doesn't
+/// machine-gun the bell.
+const BEEP_THROTTLE: Duration = Duration::from_millis(250);
+/// Timed-read interval for the raw-input loop; bounds shutdown latency.
+const READ_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Read manual input PASTE-ONLY: pasted text is captured silently (terminal
+/// echo is off) and rendered through the same path as a conversation entry;
+/// ordinary typing is ignored with a throttled BEL. Escape sequences (arrow
+/// keys, etc.) and control bytes are consumed silently.
 fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdown: &AtomicBool) {
     let proto = match graphics::select() {
         Some(p) => p,
-        None => return,
+        None => {
+            logging::warn("read_input: no graphics protocol; manual paste input disabled");
+            return;
+        }
     };
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
+    let mut raw = match termbg::raw_input() {
+        Some(r) => r,
+        None => {
+            logging::warn("read_input: could not enter raw stdin mode; manual paste input disabled");
+            return;
+        }
+    };
+    logging::info("read_input: raw stdin mode active; paste-only input enabled");
+
+    enable_bracketed_paste();
+
+    let mut parser = PasteParser::new();
+    let mut last_beep: Option<Instant> = None;
+    let mut buf = [0u8; 4096];
+
+    loop {
         if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        match line {
-            Ok(text) => {
-                let _lock = out_mu.lock().unwrap();
-                emit_text(&text, block_threshold, ref_height, true, &proto);
+        let n = match raw.read(&mut buf, READ_TIMEOUT) {
+            Some(n) => n,
+            None => break,
+        };
+        for &byte in &buf[..n] {
+            match parser.feed(byte) {
+                Some(PasteEvent::PasteComplete(s)) => {
+                    let _lock = out_mu.lock().unwrap();
+                    emit_text(&s, block_threshold, ref_height, &proto);
+                }
+                Some(PasteEvent::RejectTyping) => {
+                    if last_beep.is_none_or(|t| t.elapsed() >= BEEP_THROTTLE) {
+                        beep();
+                        last_beep = Some(Instant::now());
+                    }
+                }
+                None => {}
             }
-            Err(_) => break,
+        }
+    }
+
+    disable_bracketed_paste();
+}
+
+fn enable_bracketed_paste() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(PASTE_ON);
+    let _ = out.flush();
+}
+
+fn disable_bracketed_paste() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(PASTE_OFF);
+    let _ = out.flush();
+}
+
+fn beep() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(BEL);
+    let _ = out.flush();
+}
+
+/// Event produced by [`PasteParser`] from the raw input stream.
+#[derive(Debug, PartialEq)]
+enum PasteEvent {
+    /// A complete bracketed paste; carries the inner (lossy-UTF8) text.
+    PasteComplete(String),
+    /// The user typed (rather than pasted) printable input — to be rejected.
+    RejectTyping,
+}
+
+/// Internal parser state.
+#[derive(PartialEq)]
+enum PasteState {
+    /// Outside a paste, matching nothing special.
+    Idle,
+    /// Matched some prefix of the start marker `ESC [ 2 0 0 ~`; `matched` is
+    /// how many bytes of [`PASTE_START`] have matched so far (≥1).
+    StartMarker { matched: usize },
+    /// Inside a paste, buffering bytes and matching the end marker; `end_matched`
+    /// is how many bytes of [`PASTE_END`] have matched at the buffer tail.
+    Capturing { end_matched: usize },
+    /// Consuming an escape sequence (arrow keys, etc.) outside a paste.
+    Escape,
+}
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// A byte-at-a-time state machine recognising bracketed-paste markers and
+/// classifying non-paste input. Pure and unit-testable: no I/O.
+struct PasteParser {
+    state: PasteState,
+    buf: Vec<u8>,
+}
+
+impl PasteParser {
+    fn new() -> Self {
+        PasteParser {
+            state: PasteState::Idle,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Feed one byte; return an event when one is recognised.
+    fn feed(&mut self, byte: u8) -> Option<PasteEvent> {
+        match self.state {
+            PasteState::Idle => self.feed_idle(byte),
+            PasteState::StartMarker { matched } => self.feed_start_marker(matched, byte),
+            PasteState::Capturing { end_matched } => self.feed_capturing(end_matched, byte),
+            PasteState::Escape => {
+                // Consume a CSI/escape sequence: a final byte (>=0x40) ends it.
+                if byte >= 0x40 {
+                    self.state = PasteState::Idle;
+                }
+                None
+            }
+        }
+    }
+
+    fn feed_idle(&mut self, byte: u8) -> Option<PasteEvent> {
+        if byte == 0x1b {
+            self.state = PasteState::StartMarker { matched: 1 };
+            None
+        } else if byte < 0x20 {
+            // Control bytes (other than ESC): consume silently.
+            None
+        } else {
+            // Printable ASCII or UTF-8 lead/continuation byte: typed input.
+            Some(PasteEvent::RejectTyping)
+        }
+    }
+
+    fn feed_start_marker(&mut self, matched: usize, byte: u8) -> Option<PasteEvent> {
+        if byte == PASTE_START[matched] {
+            let next = matched + 1;
+            if next == PASTE_START.len() {
+                self.buf.clear();
+                self.state = PasteState::Capturing { end_matched: 0 };
+            } else {
+                self.state = PasteState::StartMarker { matched: next };
+            }
+            None
+        } else {
+            // Not the paste start — it was some other escape sequence
+            // (e.g. ESC [ A for up arrow). Consume it silently.
+            self.state = if byte >= 0x40 {
+                PasteState::Idle
+            } else {
+                PasteState::Escape
+            };
+            None
+        }
+    }
+
+    fn feed_capturing(&mut self, end_matched: usize, byte: u8) -> Option<PasteEvent> {
+        if byte == PASTE_END[end_matched] {
+            let next = end_matched + 1;
+            if next == PASTE_END.len() {
+                let text = String::from_utf8_lossy(&self.buf).into_owned();
+                self.buf.clear();
+                self.state = PasteState::Idle;
+                return Some(PasteEvent::PasteComplete(text));
+            }
+            self.state = PasteState::Capturing { end_matched: next };
+            None
+        } else {
+            // Partial end-marker match broke: those bytes were real content.
+            if end_matched > 0 {
+                self.buf.extend_from_slice(&PASTE_END[..end_matched]);
+                // Re-test this byte against a fresh end-marker scan.
+                self.state = PasteState::Capturing { end_matched: 0 };
+                return self.feed_capturing(0, byte);
+            }
+            self.buf.push(byte);
+            self.state = PasteState::Capturing { end_matched: 0 };
+            None
         }
     }
 }
 
 /// Echo text to stdout, rendering math inline (short) or on its own line
 /// (tall). Non-math text is mirrored verbatim with newlines preserved.
-/// When `allow_bare` is true and there's no delimited math, the whole trimmed
-/// line is rendered as one bare inline LaTeX expression (manual-input mode).
 /// Returns the number of math segments emitted (render attempts).
 fn emit_text(
     text: &str,
     block_threshold: u32,
     ref_height: u32,
-    allow_bare: bool,
     proto: &graphics::Protocol,
 ) -> usize {
     let segs = mathscan::scan(text);
     if segs.is_empty() {
         return 0;
     }
-    let has_math = segs.iter().any(|s| s.kind == mathscan::Kind::Math);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-
-    if !has_math && allow_bare {
-        let expr = text.trim().to_string();
-        if expr.is_empty() {
-            return 0;
-        }
-        let bare = vec![mathscan::Segment {
-            kind: mathscan::Kind::Math,
-            text: expr,
-            display: false,
-        }];
-        return emit_segments(&mut out, &bare, block_threshold, ref_height, proto);
-    }
 
     emit_segments(&mut out, &segs, block_threshold, ref_height, proto)
 }
@@ -423,7 +590,7 @@ fn catch_up(
     let mut rendered = 0usize;
     for (_, seg) in &recent {
         let _lock = out_mu.lock().unwrap();
-        rendered += emit_text(&seg.text, block_threshold, ref_height, false, proto);
+        rendered += emit_text(&seg.text, block_threshold, ref_height, proto);
     }
     logging::info(&format!(
         "catch-up: rendered {rendered} expression(s) from {segments} text segment(s) in the last {minutes}m"
@@ -520,6 +687,86 @@ mod tests {
         // Clamps to at least 1 even for tiny images.
         assert_eq!(rows_for(0, 42), 1);
         assert_eq!(rows_for(5, 42), 1); // 0.12 * 1.25 = 0.15 -> 0 -> clamp 1
+    }
+
+    fn feed_all(p: &mut PasteParser, bytes: &[u8]) -> Vec<PasteEvent> {
+        bytes.iter().filter_map(|&b| p.feed(b)).collect()
+    }
+
+    #[test]
+    fn clean_paste_yields_one_complete() {
+        let mut p = PasteParser::new();
+        let input = b"\x1b[200~hello $x$ world\x1b[201~";
+        let events = feed_all(&mut p, input);
+        assert_eq!(
+            events,
+            vec![PasteEvent::PasteComplete("hello $x$ world".to_string())]
+        );
+    }
+
+    #[test]
+    fn multiline_paste_preserves_newlines() {
+        let mut p = PasteParser::new();
+        let input = b"\x1b[200~line1\nline2\n$$y$$\x1b[201~";
+        let events = feed_all(&mut p, input);
+        assert_eq!(
+            events,
+            vec![PasteEvent::PasteComplete("line1\nline2\n$$y$$".to_string())]
+        );
+    }
+
+    #[test]
+    fn markers_split_across_feeds_still_parse() {
+        let mut p = PasteParser::new();
+        // Start marker split byte-by-byte, content, end marker split.
+        let mut events = Vec::new();
+        for chunk in [
+            &b"\x1b[2"[..],
+            &b"00~"[..],
+            &b"ab"[..],
+            &b"\x1b[20"[..],
+            &b"1~"[..],
+        ] {
+            events.extend(feed_all(&mut p, chunk));
+        }
+        assert_eq!(events, vec![PasteEvent::PasteComplete("ab".to_string())]);
+    }
+
+    #[test]
+    fn typed_printable_rejected() {
+        let mut p = PasteParser::new();
+        assert_eq!(p.feed(b'a'), Some(PasteEvent::RejectTyping));
+        assert_eq!(p.feed(b' '), Some(PasteEvent::RejectTyping));
+        // UTF-8 lead byte counts as typed input too.
+        assert_eq!(p.feed(0xc3), Some(PasteEvent::RejectTyping));
+    }
+
+    #[test]
+    fn arrow_key_escape_is_silent() {
+        let mut p = PasteParser::new();
+        // ESC [ A — up arrow — outside paste, no RejectTyping.
+        assert_eq!(feed_all(&mut p, b"\x1b[A"), vec![]);
+        // Parser is back to idle and rejects subsequent typing.
+        assert_eq!(p.feed(b'z'), Some(PasteEvent::RejectTyping));
+    }
+
+    #[test]
+    fn control_bytes_silent() {
+        let mut p = PasteParser::new();
+        // Tab, CR, LF, Ctrl-C — none produce an event.
+        assert_eq!(feed_all(&mut p, b"\t\r\n\x03"), vec![]);
+    }
+
+    #[test]
+    fn end_marker_false_start_kept_as_content() {
+        let mut p = PasteParser::new();
+        // Content contains a lone ESC that does not begin the end marker.
+        let input = b"\x1b[200~a\x1bb\x1b[201~";
+        let events = feed_all(&mut p, input);
+        assert_eq!(
+            events,
+            vec![PasteEvent::PasteComplete("a\x1bb".to_string())]
+        );
     }
 
     #[test]

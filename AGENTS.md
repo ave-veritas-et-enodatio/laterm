@@ -26,8 +26,7 @@ It spawns no child process. It derives the Claude Code log directory, tails
 every `*.jsonl` conversation log, and for each new entry echoes the full
 conversation text to stdout with all LaTeX math expressions rendered as inline
 images in place. Pass `--catch-up` to first replay recent history before
-tailing begins. It also renders expressions typed or pasted directly into its
-window.
+tailing begins. You can also paste text directly into its window to render it on the spot.
 
 Crate name: `laterm`. Source root: `src/`.
 
@@ -98,11 +97,17 @@ segments rendered via `render::render`, then `rows = max(1, round(height_px /
 reference_X_height_px × 1.25))` computed and `proto.encode(png, rows)` called for
 every image (`1.25` = `ROW_SCALE`, a legibility bump). Height ≥ 1.5× reference → block layout (newline + image +
 newline); otherwise inline (in flow). Handle SIGINT/SIGTERM. Also
-reads stdin (line mode): each typed/pasted line is rendered through the same
-path — delimited math like conversation text, an undelimited line as one bare
-LaTeX expression. A shared output mutex keeps conversation and manual renders
-from interleaving. Contains no rendering, parsing, or protocol logic. Only this
-module writes to stdout.
+reads stdin in raw mode via `termbg::raw_input()` (echo OFF, canonical mode OFF,
+`ISIG` preserved). Enables bracketed paste (`ESC[?2004h`) at startup and
+disables it (`ESC[?2004l`) on exit. Pasted text is captured silently between
+the bracketed-paste markers `ESC[200~` … `ESC[201~` and processed through the
+same conversation path — prose mirrored verbatim, delimited math rendered in
+place. Typed printable keystrokes produce a throttled BEL (`\x07`, at most
+~once per 250 ms); escape sequences and control bytes are consumed silently.
+Typed input is never rendered; the old bare-expression behavior is removed. A
+shared output mutex keeps conversation and manual renders from interleaving.
+Contains no rendering, parsing, or protocol logic. Only this module writes to
+stdout (bracketed-paste toggles and BEL included).
 
 **`watch`** — Polls `dir` at `interval` for `*.jsonl` files. Tail-only:
 existing files are recorded at their current size at startup; files appearing
@@ -176,14 +181,22 @@ at its native pixel size (known limitation). Uses an opaque background for rende
 (`\x1b]11;?`) and parses the `rgb:…` reply; `is_dark` and `parse_osc11` are
 platform-independent. `query_terminal(request, timeout) -> Option<String>` is a
 shared low-level helper (pub(crate)) that sends any terminal request in raw mode
-and returns the reply — reused by `sixel`'s DA1 probe. Platform implementations:
-- **unix** — opens `/dev/tty`; uses `libc` for termios raw mode
-  (`cfmakeraw`/`tcsetattr`) and `select(2)` for the read timeout.
+and returns the reply — reused by `sixel`'s DA1 probe. `raw_input() ->
+Option<RawInput>` opens a persistent raw-input mode for `main`'s read side:
+echo OFF, canonical mode OFF, `ISIG` preserved; RAII restores the prior mode on
+drop. Platform implementations:
+- **unix** — `query_terminal` opens `/dev/tty`; uses `libc` for termios raw
+  mode (`cfmakeraw`/`tcsetattr`) and `select(2)` for the read timeout.
+  `raw_input` operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN`,
+  keeps `OPOST` and `ISIG`; sets `VMIN=0 / VTIME=1`.
 - **Windows** — uses `windows-sys` Console API: `GetStdHandle`,
   `SetConsoleMode` with `ENABLE_VIRTUAL_TERMINAL_INPUT`,
   `WaitForSingleObject` for the timeout, `ReadConsoleA` for the reply.
+  `raw_input` operates on conin; clears `ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT`,
+  sets `ENABLE_VIRTUAL_TERMINAL_INPUT`; leaves output mode untouched.
   Full OSC 11 parity — not a stub.
-Used once at startup to pick a contrasting glyph color.
+Used once at startup to pick a contrasting glyph color (`query`); `raw_input`
+is used by `main`'s manual-input read loop.
 
 **`logging`** — Configures structured, leveled logging. File output at mode
 0600, append. Path resolved by `main` from `--log-file` or the default beside
