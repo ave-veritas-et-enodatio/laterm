@@ -6,7 +6,8 @@ terminal window.
 
 LaTerm does not wrap or intercept Claude Code. It runs alongside it: you launch
 it in its own graphics-capable terminal window, and it tails the project's
-conversation logs, rendering any math it sees.
+conversation logs, echoing the conversation text with any math it contains
+rendered as inline images in place.
 
 ![screenshot](screenshot.png)
 
@@ -62,8 +63,8 @@ laterm [options]
 
 As Claude Code's conversation produces LaTeX math —
 `$...$` / `\(...\)` (inline) or `$$...$$` / `\[...\]` (display) — LaTerm
-renders each expression as an image in its window, with a little surrounding
-text to anchor it. You can also type or paste an expression directly into the
+echoes the conversation text in its window, rendering each expression as an
+image in place. You can also type or paste an expression directly into the
 LaTerm window to render it on the spot.
 
 ## Usage / Options
@@ -91,11 +92,12 @@ laterm [--log-file <PATH>] [--catch-up[=<MINS>]] [--help]
    using the terminal's image protocol (kitty, imgcat, or Sixel — in that
    preference order). If rendering fails, the raw LaTeX is passed through as text.
 
-Output is a **sparse feed**: only math expressions plus a short window (≤40
-chars) of the surrounding prose are shown — text with no math produces nothing.
-A small expression (single symbol, simple sub/superscript) renders inline at
-text height; a tall one (fraction, integral, summation) renders as its own
-image block. At startup LaTerm queries the terminal background (OSC 11) and
+Output is a **full echo**: the conversation text is mirrored verbatim, with each
+math expression rendered as an image in place. A small expression (single symbol,
+simple sub/superscript) renders inline in the text flow; a tall one (fraction,
+integral, summation) renders on its own line. Image size scales proportionally to
+the terminal's text, so math sits naturally alongside the prose. At startup
+LaTerm queries the terminal background (OSC 11) and
 renders glyphs in a contrasting color on a transparent background, falling back
 to black-on-white if the query is unanswered. (The Sixel path renders on an
 opaque background of the detected terminal color, since Sixel transparency is
