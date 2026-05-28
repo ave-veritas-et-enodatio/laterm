@@ -24,8 +24,8 @@ laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 
 It spawns no child process. It derives the Claude Code log directory, tails
 every `*.jsonl` conversation log, and for each new entry echoes the full
-conversation text to stdout with all LaTeX math expressions rendered as inline
-images in place. Pass `--catch-up` to first replay recent history before
+conversation text to stdout — prefixed with a color-coded role marker — with all
+LaTeX math expressions rendered as inline images in place. Pass `--catch-up` to first replay recent history before
 tailing begins. You can also paste text directly into its window to render it on the spot.
 
 Crate name: `laterm`. Source root: `src/`.
@@ -102,17 +102,27 @@ reads stdin in raw mode via `termbg::raw_input()` (echo OFF, canonical mode OFF,
 disables it (`ESC[?2004l`) on exit. Pasted text is captured silently between
 the bracketed-paste markers `ESC[200~` … `ESC[201~` and processed through the
 same conversation path — prose mirrored verbatim, delimited math rendered in
-place. Pressing Enter/Return writes a visual separator to stdout: a blank line,
-a terminal-width rule of `=` characters (width from `termbg::term_width()`,
-default 80 columns), then a newline. Debounce: if the last output was already a
-manual separator, Enter beeps instead of stacking a second rule; any rendered
-content (conversation entry or paste) re-arms it. Typed printable keystrokes
-produce a throttled BEL (`\x07`, at most ~once per 250 ms); escape sequences
-and control bytes are consumed silently. Typed input is never rendered; the old
-bare-expression behavior is removed. A shared output mutex keeps conversation
-and manual renders from interleaving. Contains no rendering, parsing, or
-protocol logic. Only this module writes to stdout (bracketed-paste toggles,
-separator rules, and BEL included).
+place. Before emitting each entry's content, writes a color-coded role marker —
+`(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> ` (bold cyan,
+`\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
+`\x1b[1;35m`) for pasted text. Role is derived from the conversation entry's
+`role` field; pasted text always uses the paste marker. Markers use the basic
+8-color ANSI SGR palette so they track the user's terminal color scheme; color
+is reset (`\x1b[0m`) before entry content so prose keeps the terminal's default
+foreground. One marker per entry, not per line. Entries with no renderable
+content emit nothing. Each entry is followed by a single blank-line separator.
+Pressing Enter/Return writes a visual separator to stdout: a blank line, then a
+terminal-width rule of `═` (U+2550) characters in bold yellow (`\x1b[1;33m`)
+(width from `termbg::term_width()`, default 80 columns), then a newline.
+Debounce: if the last output was already a manual separator, Enter beeps instead
+of stacking a second rule; any rendered content (conversation entry or paste)
+re-arms it. Typed printable keystrokes produce a throttled BEL (`\x07`, at most
+~once per 250 ms); escape sequences and control bytes are consumed silently.
+Typed input is never rendered; the old bare-expression behavior is removed. A
+shared output mutex keeps conversation and manual renders from interleaving.
+Contains no rendering, parsing, or protocol logic. Only this module writes to
+stdout (role markers, bracketed-paste toggles, separator rules, and BEL
+included).
 
 **`watch`** — Polls `dir` at `interval` for `*.jsonl` files. Tail-only:
 existing files are recorded at their current size at startup; files appearing

@@ -176,10 +176,15 @@ fn run() -> i32 {
         if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        for seg in convo::extract(&line.data) {
-            let _lock = out_mu.lock().unwrap();
-            emit_text(&seg.text, block_threshold, ref_height, &proto);
+        let segs = convo::extract(&line.data);
+        if segs.is_empty() {
+            continue;
         }
+        // All segments of one entry share a role; mark and separate per entry.
+        let marker = role_marker(&segs[0].role);
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        let _lock = out_mu.lock().unwrap();
+        emit_entry(marker, &texts, block_threshold, ref_height, &proto);
     }
 
     0
@@ -197,8 +202,24 @@ const BEEP_THROTTLE: Duration = Duration::from_millis(250);
 /// Timed-read interval for the raw-input loop; bounds shutdown latency.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Role-marker prefixes written before each emitted entry, so the feed is easy
+/// to scan: user, assistant/agent, and manually-pasted text. Each is ANSI
+/// color-coded (bold) for a stronger visual difference, with the glyphs
+/// distinct per role; the color is reset before the entry's content so prose
+/// keeps the terminal's default foreground.
+const USER_MARKER: &str = "\x1b[1;32m(u)>\x1b[0m "; // bold green
+const ASSISTANT_MARKER: &str = "\x1b[1;36m[a]>\x1b[0m "; // bold cyan
+const PASTE_MARKER: &str = "\x1b[1;35m{p}>\x1b[0m "; // bold magenta
+
+/// ANSI reset (SGR 0) closing the color spans above and the separator below.
+const SGR_RESET: &str = "\x1b[0m";
+/// Manual-separator rule: bold yellow, distinct from the role-marker colors.
+const SEPARATOR_SGR: &str = "\x1b[1;33m";
+/// Separator glyph: U+2550 box-drawings double horizontal (solid double line).
+const SEPARATOR_CHAR: &str = "═";
+
 /// Tracks whether the last thing written to stdout was a manual separator
-/// (Enter in the viewing window). Real content (`emit_text`) clears it; the
+/// (Enter in the viewing window). Real content (`emit_entry`) clears it; the
 /// read loop refuses to stack a second separator and beeps instead.
 static LAST_WAS_SEPARATOR: AtomicBool = AtomicBool::new(false);
 
@@ -241,7 +262,7 @@ fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdow
             match parser.feed(byte) {
                 Some(PasteEvent::PasteComplete(s)) => {
                     let _lock = out_mu.lock().unwrap();
-                    emit_text(&s, block_threshold, ref_height, &proto);
+                    emit_entry(PASTE_MARKER, &[&s], block_threshold, ref_height, &proto);
                 }
                 Some(PasteEvent::Newline) => {
                     let _lock = out_mu.lock().unwrap();
@@ -272,13 +293,12 @@ fn throttled_beep(last_beep: &mut Option<Instant>) {
 }
 
 /// Write a deliberate visual separator: a blank line, a terminal-width rule of
-/// `=`, and a trailing newline. Caller holds the output mutex.
+/// the double-line glyph (color-coded), and a trailing newline. Caller holds
+/// the output mutex.
 fn write_separator() {
-    let rule = "=".repeat(termbg::term_width());
+    let rule = SEPARATOR_CHAR.repeat(termbg::term_width());
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\n");
-    let _ = out.write_all(rule.as_bytes());
-    let _ = out.write_all(b"\n");
+    let _ = write!(out, "\n{SEPARATOR_SGR}{rule}{SGR_RESET}\n");
     let _ = out.flush();
 }
 
@@ -425,17 +445,20 @@ impl PasteParser {
     }
 }
 
-/// Echo text to stdout, rendering math inline (short) or on its own line
-/// (tall). Non-math text is mirrored verbatim with newlines preserved.
-/// Returns the number of math segments emitted (render attempts).
-fn emit_text(
-    text: &str,
+/// Emit one conversation/paste entry: the role marker, then each of the entry's
+/// texts rendered (math inline if short, on its own line if tall; prose mirrored
+/// verbatim), then a single blank-line separator. Returns the number of math
+/// segments emitted (render attempts). Emits nothing (and no marker) when the
+/// entry has no renderable content.
+fn emit_entry(
+    marker: &str,
+    texts: &[&str],
     block_threshold: u32,
     ref_height: u32,
     proto: &graphics::Protocol,
 ) -> usize {
-    let segs = mathscan::scan(text);
-    if segs.is_empty() {
+    let scanned: Vec<Vec<mathscan::Segment>> = texts.iter().map(|t| mathscan::scan(t)).collect();
+    if scanned.iter().all(Vec::is_empty) {
         return 0;
     }
 
@@ -445,19 +468,33 @@ fn emit_text(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    emit_segments(&mut out, &segs, block_threshold, ref_height, proto)
+    let _ = write!(out, "{marker}");
+    let mut at_line_start = false; // marker just written
+    let mut math_count = 0usize;
+    for segs in &scanned {
+        math_count += emit_segments(&mut out, segs, &mut at_line_start, block_threshold, ref_height, proto);
+    }
+
+    // Close the entry on its own line, then one blank line as the separator.
+    if !at_line_start {
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out);
+    math_count
 }
 
 /// Walk a flat segment stream, writing text verbatim and rendering math in
-/// place. Returns the number of math segments emitted.
+/// place. `at_line_start` carries cursor state across calls (so a leading marker
+/// and successive text blocks share it). Returns the number of math segments
+/// emitted. The caller is responsible for any trailing newline.
 fn emit_segments(
     out: &mut impl Write,
     segs: &[mathscan::Segment],
+    at_line_start: &mut bool,
     block_threshold: u32,
     ref_height: u32,
     proto: &graphics::Protocol,
 ) -> usize {
-    let mut at_line_start = true;
     let mut math_count = 0usize;
 
     for seg in segs {
@@ -465,7 +502,7 @@ fn emit_segments(
             mathscan::Kind::Text => {
                 if !seg.text.is_empty() {
                     let _ = write!(out, "{}", seg.text);
-                    at_line_start = seg.text.ends_with('\n');
+                    *at_line_start = seg.text.ends_with('\n');
                 }
             }
             mathscan::Kind::Math => {
@@ -473,34 +510,39 @@ fn emit_segments(
                 match render::render(&seg.text, seg.display) {
                     Ok((png, height)) if height >= block_threshold => {
                         let rows = rows_for(height, ref_height);
-                        if !at_line_start {
+                        if !*at_line_start {
                             let _ = writeln!(out);
                         }
                         let _ = out.write_all(&proto.encode(&png, rows));
                         let _ = writeln!(out);
-                        at_line_start = true;
+                        *at_line_start = true;
                     }
                     Ok((png, height)) => {
                         let rows = rows_for(height, ref_height);
                         let _ = out.write_all(&proto.encode(&png, rows));
-                        at_line_start = false;
+                        *at_line_start = false;
                     }
                     Err(e) => {
                         // Pass raw LaTeX through on failure.
                         logging::warn(&format!("render failed ({e}), passing through raw latex"));
                         let delim = if seg.display { "$$" } else { "$" };
                         let _ = write!(out, "{delim}{}{delim}", seg.text);
-                        at_line_start = false;
+                        *at_line_start = false;
                     }
                 }
             }
         }
     }
 
-    if !at_line_start {
-        let _ = writeln!(out);
-    }
     math_count
+}
+
+/// Role-marker prefix for a conversation entry, by its `role`.
+fn role_marker(role: &str) -> &'static str {
+    match role {
+        "user" => USER_MARKER,
+        _ => ASSISTANT_MARKER,
+    }
 }
 
 /// Configure the render theme from the detected terminal background.
@@ -619,7 +661,7 @@ fn catch_up(
     let mut rendered = 0usize;
     for (_, seg) in &recent {
         let _lock = out_mu.lock().unwrap();
-        rendered += emit_text(&seg.text, block_threshold, ref_height, proto);
+        rendered += emit_entry(role_marker(&seg.role), &[&seg.text], block_threshold, ref_height, proto);
     }
     logging::info(&format!(
         "catch-up: rendered {rendered} expression(s) from {segments} text segment(s) in the last {minutes}m"
@@ -781,6 +823,14 @@ mod tests {
         let mut p = PasteParser::new();
         // Tab and Ctrl-C produce no event (CR/LF are Newline, tested separately).
         assert_eq!(feed_all(&mut p, b"\t\x03"), vec![]);
+    }
+
+    #[test]
+    fn role_marker_maps_user_and_assistant() {
+        assert_eq!(role_marker("user"), USER_MARKER);
+        assert_eq!(role_marker("assistant"), ASSISTANT_MARKER);
+        // Unknown roles fall back to the assistant marker.
+        assert_eq!(role_marker("system"), ASSISTANT_MARKER);
     }
 
     #[test]

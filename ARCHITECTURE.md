@@ -57,8 +57,16 @@ blocking defect.
    cap-height. A tall expression (rendered
    height ≥ 1.5× the reference X height) is a **block**: it appears on its own
    line (newline before + image + newline). A shorter expression stays **inline**
-   in the text flow. Both layouts call the same `encode(png, rows)`. Only the
-   `main` module writes to stdout.
+   in the text flow. Both layouts call the same `encode(png, rows)`. Each emitted
+   entry (one jsonl conversation entry, or one paste) is prefixed with a
+   color-coded role marker emitted once per entry — not per line: `(u)> ` (bold
+   green) for user entries, `[a]> ` (bold cyan) for assistant/agent entries,
+   `{p}> ` (bold magenta) for manually pasted text. Markers use ANSI SGR escapes
+   from the basic 8-color palette (e.g. `\x1b[1;32m…\x1b[0m`) so they track the
+   user's terminal color scheme; color is reset before the entry's content so
+   prose keeps the terminal's default foreground. Entries with no renderable
+   content emit nothing (no marker). Each entry is followed by a single blank-line
+   separator. Only the `main` module writes to stdout (role markers included).
 
 **Resilience**
 
@@ -152,17 +160,29 @@ src/
   `ESC[200~` … `ESC[201~` and processed through the same conversation path —
   prose mirrored verbatim, delimited math rendered in place (inline vs block by
   height, proportional `rows` sizing). Multi-line pastes are handled as one
-  entry. Pressing Enter/Return writes a visual separator to stdout: a blank line,
-  then a terminal-width rule of `=` characters (width from `termbg::term_width()`,
-  falling back to 80 columns), then a newline. Debounce: if the last output was
-  already a manual separator, Enter beeps instead of stacking a second rule; any
-  subsequently rendered content (a conversation entry or a paste) re-arms the
-  separator. Typed printable keystrokes produce a throttled terminal BEL (`\x07`,
-  at most ~once per 250 ms); escape sequences and control bytes are consumed
-  silently. Typed input is never rendered. Ctrl-C still fires SIGINT (`ISIG`
-  preserved). A shared output mutex keeps conversation and manual renders from
-  interleaving. Only `main` writes to stdout (bracketed-paste toggles, separator
-  rules, and BEL included).
+  entry. Before emitting each entry's content, `main` writes a color-coded role
+  marker: `(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> ` (bold
+  cyan, `\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
+  `\x1b[1;35m`) for pasted text. The role is derived from the conversation
+  entry's `role` field (`user` → user marker; anything else → assistant marker);
+  pasted text always uses the paste marker. Markers use ANSI SGR escapes from
+  the basic 8-color palette, chosen so they track the user's terminal color
+  scheme rather than imposing fixed truecolor values; the color is reset
+  (`\x1b[0m`) before the entry's content so prose keeps the terminal's default
+  foreground. One marker per entry — not per line. Entries with no renderable
+  content emit nothing (no marker). Each entry is followed by a single blank-line
+  separator. Pressing Enter/Return writes a visual separator to stdout: a blank
+  line, then a terminal-width rule of `═` (U+2550, box-drawings double-horizontal)
+  characters in bold yellow (`\x1b[1;33m`), then a newline (width from
+  `termbg::term_width()`, falling back to 80 columns). Debounce: if the last
+  output was already a manual separator, Enter beeps instead of stacking a second
+  rule; any subsequently rendered content (a conversation entry or a paste)
+  re-arms the separator. Typed printable keystrokes produce a throttled terminal
+  BEL (`\x07`, at most ~once per 250 ms); escape sequences and control bytes are
+  consumed silently. Typed input is never rendered. Ctrl-C still fires SIGINT
+  (`ISIG` preserved). A shared output mutex keeps conversation and manual renders
+  from interleaving. Only `main` writes to stdout (role markers, bracketed-paste
+  toggles, separator rules, and BEL included).
 - Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
   absolute working directory path is replaced by `-`.
 - Must NOT contain: rendering logic, parsing logic, or sanitization logic.
@@ -378,11 +398,15 @@ complete. Organized by component, in implementation priority order.
   (`ESC[?2004h`) at startup and disabled (`ESC[?2004l`) on exit. Text pasted
   into the window is captured silently between the bracketed-paste markers and
   rendered through the same path as a conversation entry (full echo: prose
-  verbatim, delimited math rendered in place). Pressing Enter/Return writes a
-  separator to stdout: a blank line, a terminal-width rule of `=` characters
-  (width via `termbg::term_width()`, default 80), and a newline. If the last
-  output was already a manual separator, Enter beeps instead (no stacked rules);
-  any rendered content re-arms it. Typed printable keystrokes produce a throttled
+  verbatim, delimited math rendered in place). Each rendered entry — conversation
+  or paste — is prefixed with a role marker (`(u)> ` bold green, `[a]> ` bold
+  cyan, `{p}> ` bold magenta) and followed by a single blank-line separator; the
+  marker is written once per entry, color reset before content, basic-ANSI palette.
+  Pressing Enter/Return writes a separator to stdout: a blank line, a
+  terminal-width rule of `═` (U+2550) characters in bold yellow (width via
+  `termbg::term_width()`, default 80), and a newline. If the last output was
+  already a manual separator, Enter beeps instead (no stacked rules); any
+  rendered content re-arms it. Typed printable keystrokes produce a throttled
   BEL (`\x07`, at most ~once per 250 ms); escape sequences and control bytes are
   consumed silently. There is no bare-expression rendering for undelimited typed
   input — that behavior is removed.
@@ -454,8 +478,9 @@ complete. Organized by component, in implementation priority order.
 
 ### Cross-cutting
 
-- Nothing appears on stdout except verbatim conversation text and
-  graphics-protocol escape sequences (kitty, imgcat, or Sixel).
+- Nothing appears on stdout except ANSI role markers, verbatim conversation
+  text, graphics-protocol escape sequences (kitty, imgcat, or Sixel), blank-line
+  entry separators, and the `═` separator rule.
 - No logging unless `--log <PATH>` is given (no default path). When enabled:
   mode-0600 append, exclusive writer lock held for the process lifetime. A
   second instance pointed at the same path fails to acquire the lock, prints
@@ -519,7 +544,8 @@ walk flat segment list in order:
                    glyph color contrasts the detected terminal background;
                    sixel path uses opaque background; sixel ignores rows — native size)
 
-stdout: full conversation text + rendered images in document order
+per entry: role marker (basic-ANSI color) + full conversation text +
+            rendered images in document order + trailing blank line
 ```
 
 ---
