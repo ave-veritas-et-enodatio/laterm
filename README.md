@@ -66,7 +66,10 @@ As Claude Code's conversation produces LaTeX math —
 echoes the conversation text in its window, rendering each expression as an
 image in place. You can also paste text (e.g. a snippet containing math) directly
 into the LaTerm window; it is rendered like a conversation entry. Typed input is
-not accepted — ordinary keystrokes produce a beep.
+not accepted — ordinary keystrokes produce a beep. Pressing Enter/Return inserts
+a full-width rule of `=` characters to manually separate topics in the rendered
+feed; pressing Enter again without any rendered content in between just beeps
+(rules do not stack).
 
 ## Usage / Options
 

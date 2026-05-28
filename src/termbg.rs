@@ -45,6 +45,15 @@ impl RawInput {
     }
 }
 
+/// Fallback terminal width (columns) when the size query fails.
+const DEFAULT_TERM_WIDTH: usize = 80;
+
+/// Current terminal width in columns, or `DEFAULT_TERM_WIDTH` when it cannot be
+/// determined. Queried fresh (cheap ioctl / console call) so it tracks resizes.
+pub(crate) fn term_width() -> usize {
+    platform::term_width()
+}
+
 /// Report whether an RGB color is dark (relative luminance < 128).
 pub fn is_dark(r: u8, g: u8, b: u8) -> bool {
     let lum = 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b);
@@ -234,6 +243,17 @@ mod platform {
             }
         }
     }
+
+    pub fn term_width() -> usize {
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
+                ws.ws_col as usize
+            } else {
+                super::DEFAULT_TERM_WIDTH
+            }
+        }
+    }
 }
 
 // ---- windows implementation ----
@@ -245,8 +265,8 @@ mod platform {
 
     use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, ReadConsoleA, SetConsoleMode,
-        ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleA, SetConsoleMode,
+        CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
         ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
         STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
@@ -373,6 +393,23 @@ mod platform {
             unsafe {
                 SetConsoleMode(self.conin, self.old_mode);
             }
+        }
+    }
+
+    pub fn term_width() -> usize {
+        unsafe {
+            let hout = GetStdHandle(STD_OUTPUT_HANDLE);
+            if hout.is_null() {
+                return super::DEFAULT_TERM_WIDTH;
+            }
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(hout, &mut info) != 0 {
+                let cols = info.srWindow.Right - info.srWindow.Left + 1;
+                if cols > 0 {
+                    return cols as usize;
+                }
+            }
+            super::DEFAULT_TERM_WIDTH
         }
     }
 }

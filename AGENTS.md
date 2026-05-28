@@ -102,12 +102,17 @@ reads stdin in raw mode via `termbg::raw_input()` (echo OFF, canonical mode OFF,
 disables it (`ESC[?2004l`) on exit. Pasted text is captured silently between
 the bracketed-paste markers `ESC[200~` … `ESC[201~` and processed through the
 same conversation path — prose mirrored verbatim, delimited math rendered in
-place. Typed printable keystrokes produce a throttled BEL (`\x07`, at most
-~once per 250 ms); escape sequences and control bytes are consumed silently.
-Typed input is never rendered; the old bare-expression behavior is removed. A
-shared output mutex keeps conversation and manual renders from interleaving.
-Contains no rendering, parsing, or protocol logic. Only this module writes to
-stdout (bracketed-paste toggles and BEL included).
+place. Pressing Enter/Return writes a visual separator to stdout: a blank line,
+a terminal-width rule of `=` characters (width from `termbg::term_width()`,
+default 80 columns), then a newline. Debounce: if the last output was already a
+manual separator, Enter beeps instead of stacking a second rule; any rendered
+content (conversation entry or paste) re-arms it. Typed printable keystrokes
+produce a throttled BEL (`\x07`, at most ~once per 250 ms); escape sequences
+and control bytes are consumed silently. Typed input is never rendered; the old
+bare-expression behavior is removed. A shared output mutex keeps conversation
+and manual renders from interleaving. Contains no rendering, parsing, or
+protocol logic. Only this module writes to stdout (bracketed-paste toggles,
+separator rules, and BEL included).
 
 **`watch`** — Polls `dir` at `interval` for `*.jsonl` files. Tail-only:
 existing files are recorded at their current size at startup; files appearing
@@ -184,7 +189,10 @@ shared low-level helper (pub(crate)) that sends any terminal request in raw mode
 and returns the reply — reused by `sixel`'s DA1 probe. `raw_input() ->
 Option<RawInput>` opens a persistent raw-input mode for `main`'s read side:
 echo OFF, canonical mode OFF, `ISIG` preserved; RAII restores the prior mode on
-drop. Platform implementations:
+drop. `term_width() -> usize` returns the current terminal width in columns, or
+80 when it cannot be determined; unix uses `ioctl(STDOUT_FILENO, TIOCGWINSZ)`
+via `libc`, Windows uses `GetConsoleScreenBufferInfo` via `windows-sys`.
+Platform implementations:
 - **unix** — `query_terminal` opens `/dev/tty`; uses `libc` for termios raw
   mode (`cfmakeraw`/`tcsetattr`) and `select(2)` for the read timeout.
   `raw_input` operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN`,
@@ -354,8 +362,8 @@ Current direct dependencies:
 | `png` v0.17 | `sixel` (PNG→RGBA decode; no sixel or quantization crate — encoder is in-house) |
 | `chrono` v0.4 | `main` (RFC3339 timestamp parsing for `--catch-up`) |
 | `ctrlc` v3 | `main` (cross-platform signal handling, MIT/Apache-2.0) |
-| `libc` v0.2 | `termbg` (unix only — `[target.'cfg(unix)']`); `logging` (unix only) |
-| `windows-sys` v0.59 | `termbg` (Windows only — `[target.'cfg(windows)']`) |
+| `libc` v0.2 | `termbg` (unix only — `[target.'cfg(unix)']`): termios raw mode, `select(2)`, `ioctl(TIOCGWINSZ)`; `logging` (unix only) |
+| `windows-sys` v0.59 | `termbg` (Windows only — `[target.'cfg(windows)']`): Console API for OSC 11, `GetConsoleScreenBufferInfo` for terminal width |
 
 ---
 
