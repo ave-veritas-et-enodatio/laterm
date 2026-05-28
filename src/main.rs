@@ -46,7 +46,10 @@ struct Args {
 /// Parse argv (excluding the program name). On `--help` returns Ok(None) after
 /// the caller is expected to print usage. On error returns Err with a message.
 fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
-    let mut args = Args { log_file: None, catch_up: None };
+    let mut args = Args {
+        log_file: None,
+        catch_up: None,
+    };
     let mut it = argv.into_iter();
 
     while let Some(arg) = it.next() {
@@ -135,8 +138,9 @@ fn run() -> i32 {
         return 1;
     }
 
-    // Compute block-height threshold: 1.5× height of a reference "X".
-    let block_threshold = block_height_threshold();
+    // Reference X height (one render of "X"); block threshold is 1.5× of it.
+    let ref_height = reference_height();
+    let block_threshold = ref_height * 3 / 2;
 
     // Stdout lock shared between watch loop and stdin thread.
     let out_mu: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -145,9 +149,10 @@ fn run() -> i32 {
     {
         let out_clone = out_mu.clone();
         let threshold = block_threshold;
+        let ref_h = ref_height;
         let shutdown_read = shutdown.clone();
         std::thread::spawn(move || {
-            read_input(&out_clone, threshold, &shutdown_read);
+            read_input(&out_clone, threshold, ref_h, &shutdown_read);
         });
     }
 
@@ -156,7 +161,7 @@ fn run() -> i32 {
     // Replay recent history before tailing. The tailer is tail-only (records
     // each file at its current end at startup), so it never re-renders these.
     if let Some(minutes) = args.catch_up {
-        catch_up(&dir, minutes, block_threshold, &out_mu, &proto);
+        catch_up(&dir, minutes, block_threshold, ref_height, &out_mu, &proto);
     }
 
     // Main watch loop.
@@ -168,18 +173,14 @@ fn run() -> i32 {
         }
         for seg in convo::extract(&line.data) {
             let _lock = out_mu.lock().unwrap();
-            emit_text(&seg.text, block_threshold, false, &proto);
+            emit_text(&seg.text, block_threshold, ref_height, false, &proto);
         }
     }
 
     0
 }
 
-fn read_input(
-    out_mu: &Mutex<()>,
-    block_threshold: u32,
-    shutdown: &AtomicBool,
-) {
+fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdown: &AtomicBool) {
     let proto = match graphics::select() {
         Some(p) => p,
         None => return,
@@ -192,85 +193,103 @@ fn read_input(
         match line {
             Ok(text) => {
                 let _lock = out_mu.lock().unwrap();
-                emit_text(&text, block_threshold, true, &proto);
+                emit_text(&text, block_threshold, ref_height, true, &proto);
             }
             Err(_) => break,
         }
     }
 }
 
-/// Scan text for math and emit each unit to stdout.
+/// Echo text to stdout, rendering math inline (short) or on its own line
+/// (tall). Non-math text is mirrored verbatim with newlines preserved.
 /// When `allow_bare` is true and there's no delimited math, the whole trimmed
-/// line is rendered as one bare LaTeX expression.
-/// Returns the number of render units emitted (math-bearing units).
-fn emit_text(text: &str, block_threshold: u32, allow_bare: bool, proto: &graphics::Protocol) -> usize {
-    let mut units = mathscan::scan(text);
-    if units.is_empty() {
-        if !allow_bare {
-            return 0;
-        }
-        let expr = text.trim().to_string();
-        if expr.is_empty() {
-            return 0;
-        }
-        units = vec![mathscan::Unit {
-            before: String::new(),
-            segments: vec![mathscan::Segment {
-                kind: mathscan::Kind::Math,
-                text: expr,
-                display: false,
-            }],
-            after: String::new(),
-        }];
+/// line is rendered as one bare inline LaTeX expression (manual-input mode).
+/// Returns the number of math segments emitted (render attempts).
+fn emit_text(
+    text: &str,
+    block_threshold: u32,
+    ref_height: u32,
+    allow_bare: bool,
+    proto: &graphics::Protocol,
+) -> usize {
+    let segs = mathscan::scan(text);
+    if segs.is_empty() {
+        return 0;
     }
+    let has_math = segs.iter().any(|s| s.kind == mathscan::Kind::Math);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    for unit in &units {
-        emit_unit(&mut out, unit, block_threshold, proto);
+    if !has_math && allow_bare {
+        let expr = text.trim().to_string();
+        if expr.is_empty() {
+            return 0;
+        }
+        let bare = vec![mathscan::Segment {
+            kind: mathscan::Kind::Math,
+            text: expr,
+            display: false,
+        }];
+        return emit_segments(&mut out, &bare, block_threshold, ref_height, proto);
     }
-    units.len()
+
+    emit_segments(&mut out, &segs, block_threshold, ref_height, proto)
 }
 
-fn emit_unit(
+/// Walk a flat segment stream, writing text verbatim and rendering math in
+/// place. Returns the number of math segments emitted.
+fn emit_segments(
     out: &mut impl Write,
-    unit: &mathscan::Unit,
+    segs: &[mathscan::Segment],
     block_threshold: u32,
+    ref_height: u32,
     proto: &graphics::Protocol,
-) {
-    if !unit.before.is_empty() {
-        let _ = writeln!(out, "{}", unit.before);
-    }
+) -> usize {
+    let mut at_line_start = true;
+    let mut math_count = 0usize;
 
-    for seg in &unit.segments {
+    for seg in segs {
         match seg.kind {
             mathscan::Kind::Text => {
-                let _ = write!(out, "{}", seg.text);
+                if !seg.text.is_empty() {
+                    let _ = write!(out, "{}", seg.text);
+                    at_line_start = seg.text.ends_with('\n');
+                }
             }
-            mathscan::Kind::Math => match render::render(&seg.text, seg.display) {
-                Ok((png, height)) => {
-                    if height >= block_threshold {
-                        let _ = out.write_all(&proto.encode(&png));
+            mathscan::Kind::Math => {
+                math_count += 1;
+                match render::render(&seg.text, seg.display) {
+                    Ok((png, height)) if height >= block_threshold => {
+                        let rows = rows_for(height, ref_height);
+                        if !at_line_start {
+                            let _ = writeln!(out);
+                        }
+                        let _ = out.write_all(&proto.encode(&png, rows));
                         let _ = writeln!(out);
-                    } else {
-                        let _ = out.write_all(&proto.encode_inline(&png));
+                        at_line_start = true;
+                    }
+                    Ok((png, height)) => {
+                        let rows = rows_for(height, ref_height);
+                        let _ = out.write_all(&proto.encode(&png, rows));
+                        at_line_start = false;
+                    }
+                    Err(e) => {
+                        // Pass raw LaTeX through on failure.
+                        logging::warn(&format!("render failed ({e}), passing through raw latex"));
+                        let delim = if seg.display { "$$" } else { "$" };
+                        let _ = write!(out, "{delim}{}{delim}", seg.text);
+                        at_line_start = false;
                     }
                 }
-                Err(e) => {
-                    // Pass raw LaTeX through on failure.
-                    logging::warn(&format!("render failed ({e}), passing through raw latex"));
-                    let delim = if seg.display { "$$" } else { "$" };
-                    let _ = write!(out, "{delim}{}{delim}", seg.text);
-                }
-            },
+            }
         }
     }
-    let _ = writeln!(out);
 
-    if !unit.after.is_empty() {
-        let _ = writeln!(out, "{}", unit.after);
+    if !at_line_start {
+        let _ = writeln!(out);
     }
+    math_count
 }
 
 /// Configure the render theme from the detected terminal background.
@@ -296,7 +315,12 @@ fn apply_theme(opaque_bg: bool) {
             let background = if opaque_bg {
                 logging::info(&format!("{label} on opaque detected background"));
                 sixel::set_background(r, g, b);
-                Color::new(f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0, 1.0)
+                Color::new(
+                    f32::from(r) / 255.0,
+                    f32::from(g) / 255.0,
+                    f32::from(b) / 255.0,
+                    1.0,
+                )
             } else {
                 logging::info(&format!("{label} on transparent"));
                 Color::new(0.0, 0.0, 0.0, 0.0)
@@ -308,12 +332,25 @@ fn apply_theme(opaque_bg: bool) {
 
 const DEFAULT_REF_HEIGHT: u32 = 42;
 
-fn block_height_threshold() -> u32 {
-    let ref_h = match render::render("X", false) {
+/// Rendered pixel height of a reference capital "X". A math image is scaled to
+/// a row count proportional to its height relative to this, so a capital X
+/// displays as exactly one text row and everything scales with surrounding text.
+fn reference_height() -> u32 {
+    match render::render("X", false) {
         Ok((_, h)) if h > 0 => h,
         _ => DEFAULT_REF_HEIGHT,
-    };
-    ref_h * 3 / 2
+    }
+}
+
+/// Visual scale bump so math reads at the surrounding text's full line height
+/// rather than just cap-height: a capital X alone maps to ~1 row, but everything
+/// is nudged up so blocks don't read undersized against the prose around them.
+const ROW_SCALE: f32 = 1.25;
+
+/// Row (cell) count for an image of `height_px`, relative to the reference X
+/// height `ref_px`, scaled by `ROW_SCALE`. Rounds to nearest and clamps to ≥1.
+fn rows_for(height_px: u32, ref_px: u32) -> u32 {
+    ((height_px as f32 / ref_px as f32 * ROW_SCALE).round() as u32).max(1)
 }
 
 /// Resolve the log file path: an explicit `--log-file` wins; otherwise
@@ -323,7 +360,10 @@ fn resolve_log_path(override_path: Option<PathBuf>) -> PathBuf {
     if let Some(p) = override_path {
         return p;
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
         return dir.join(LOG_FILE_NAME);
     }
     PathBuf::from(LOG_FILE_NAME)
@@ -336,6 +376,7 @@ fn catch_up(
     dir: &Path,
     minutes: i64,
     block_threshold: u32,
+    ref_height: u32,
     out_mu: &Mutex<()>,
     proto: &graphics::Protocol,
 ) {
@@ -382,7 +423,7 @@ fn catch_up(
     let mut rendered = 0usize;
     for (_, seg) in &recent {
         let _lock = out_mu.lock().unwrap();
-        rendered += emit_text(&seg.text, block_threshold, false, proto);
+        rendered += emit_text(&seg.text, block_threshold, ref_height, false, proto);
     }
     logging::info(&format!(
         "catch-up: rendered {rendered} expression(s) from {segments} text segment(s) in the last {minutes}m"
@@ -392,7 +433,9 @@ fn catch_up(
 /// Parse an RFC3339 timestamp and return it (as UTC) if it is at or after
 /// `cutoff`; otherwise None. An absent or unparseable timestamp is excluded.
 fn within_window(timestamp: Option<&str>, cutoff: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let ts = DateTime::parse_from_rfc3339(timestamp?).ok()?.with_timezone(&Utc);
+    let ts = DateTime::parse_from_rfc3339(timestamp?)
+        .ok()?
+        .with_timezone(&Utc);
     (ts >= cutoff).then_some(ts)
 }
 
@@ -441,9 +484,13 @@ mod tests {
 
     #[test]
     fn log_file_space_and_equals_forms() {
-        let a = parse_args(argv(&["--log-file", "/tmp/x.log"])).unwrap().unwrap();
+        let a = parse_args(argv(&["--log-file", "/tmp/x.log"]))
+            .unwrap()
+            .unwrap();
         assert_eq!(a.log_file, Some(PathBuf::from("/tmp/x.log")));
-        let b = parse_args(argv(&["--log-file=/tmp/y.log"])).unwrap().unwrap();
+        let b = parse_args(argv(&["--log-file=/tmp/y.log"]))
+            .unwrap()
+            .unwrap();
         assert_eq!(b.log_file, Some(PathBuf::from("/tmp/y.log")));
     }
 
@@ -461,6 +508,18 @@ mod tests {
         assert!(parse_args(argv(&["--log-file"])).is_err());
         assert!(parse_args(argv(&["--catch-up=abc"])).is_err());
         assert!(parse_args(argv(&["--catch-up=-3"])).is_err());
+    }
+
+    #[test]
+    fn rows_for_rounds_and_clamps() {
+        // Scaled by ROW_SCALE (1.25), then rounded to nearest.
+        assert_eq!(rows_for(42, 42), 1); // 1.0 * 1.25 = 1.25 -> 1
+        assert_eq!(rows_for(126, 42), 4); // 3.0 * 1.25 = 3.75 -> 4
+        assert_eq!(rows_for(59, 42), 2); // 1.40 * 1.25 = 1.76 -> 2
+        assert_eq!(rows_for(67, 42), 2); // 1.60 * 1.25 = 1.99 -> 2
+        // Clamps to at least 1 even for tiny images.
+        assert_eq!(rows_for(0, 42), 1);
+        assert_eq!(rows_for(5, 42), 1); // 0.12 * 1.25 = 0.15 -> 0 -> clamp 1
     }
 
     #[test]

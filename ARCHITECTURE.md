@@ -48,11 +48,16 @@ blocking defect.
    in chronological order. The tailer records file offsets after catch-up
    completes, so caught-up entries are never re-emitted.
 
-5. **Sparse feed semantics.** Only math expressions and a short window of their
-   surrounding prose (anchor context) are written to stdout. Conversation text
-   on lines with no math produces no output. A small expression renders inline
-   at text height; a tall one (rendered height ≥ 1.5× a reference capital
-   letter height) renders as its own image block on its own line. Only the
+5. **Full transcript echo.** All conversation text is echoed verbatim to
+   stdout — including messages and lines with no math. Every math expression is
+   rendered at a proportional row count (`rows = max(1, round(png_height_px /
+   reference_X_height_px × 1.25))`), where the reference is the pixel height of a
+   rendered capital "X" measured once at startup and `1.25` (`ROW_SCALE`) is a
+   legibility bump so math reads at the prose's full line height rather than just
+   cap-height. A tall expression (rendered
+   height ≥ 1.5× the reference X height) is a **block**: it appears on its own
+   line (newline before + image + newline). A shorter expression stays **inline**
+   in the text flow. Both layouts call the same `encode(png, rows)`. Only the
    `main` module writes to stdout.
 
 **Resilience**
@@ -106,7 +111,7 @@ src/
   main.rs          -- wiring: derive log dir, protocol select, watch loop, signal handling
   watch.rs         -- polling tailer: *.jsonl, tail-only, partial-line buffering
   convo.rs         -- jsonl parser: extracts text from user/assistant entries
-  mathscan.rs      -- LaTeX delimiter scanner: Unit{before, segments, after}
+  mathscan.rs      -- LaTeX delimiter scanner: flat Vec<Segment>, document order
   render.rs        -- RaTeX pipeline: parse → layout → display list → PNG, theme
   graphics.rs      -- protocol selection: kitty (preferred), imgcat, or sixel
   kitty.rs         -- kitty graphics protocol encoder; supported() detection
@@ -125,14 +130,17 @@ src/
   immediately (with a clear error) if none of kitty, imgcat, or Sixel is
   supported.
   Detect the terminal background via `termbg::query` and configure the renderer
-  theme. Compute the block-height threshold once (1.5× a reference render). If
-  `--catch-up` was given, replay recent history before starting the tailer.
-  Start the watch loop. For each line, call `convo::extract`, then
-  `mathscan::scan`; for each `Unit`, write its `before`/`after` anchor lines
-  and walk its segments — text inline, each math segment rendered via
-  `render::render` and emitted via the selected protocol's `encode` (block, on
-  its own line) or `encode_inline` (inline) by comparing the rendered height to
-  the threshold. Handle SIGINT/SIGTERM to stop the watch loop cleanly.
+  theme. Render a reference capital "X" once (`render::render("X", false)`,
+  default 42 px if it fails) to obtain the reference X height; this single
+  value drives both the block-threshold (1.5× reference) and the proportional
+  row count for every image. If `--catch-up` was given, replay recent history
+  before starting the tailer. Start the watch loop. For each line, call
+  `convo::extract`, then `mathscan::scan`; walk the returned flat segment list
+  in order — text segments echoed verbatim, each math segment rendered via
+  `render::render`, then `rows = max(1, round(height_px / reference_X_height_px × 1.25))`
+  computed, and the image emitted via `proto.encode(png, rows)`. Height ≥
+  1.5× reference → block layout (newline + image + newline); otherwise inline
+  (in flow). Handle SIGINT/SIGTERM to stop the watch loop cleanly.
 - Manual input: also reads stdin (line mode) and renders each typed or pasted
   line through the same path; a line with no delimited math is treated as one
   bare LaTeX expression. A shared output mutex keeps conversation and manual
@@ -162,23 +170,17 @@ src/
 - No dependencies on other laterm modules.
 
 **`mathscan`**
-- Responsibility: Scan a markdown string for LaTeX math and return an ordered
-  stream of text/math segments. Recognized delimiters: `$$...$$` and `\[...\]`
-  (Display=true); `$...$` and `\(...\)` (Display=false). `\$` is a literal
-  dollar. `\\` prevents the following `$` from opening math. Unterminated and
-  empty spans are treated as literal text. Multi-line display blocks are
-  supported.
-- Sparse-feed semantics: output is one `Unit` per math-bearing logical line.
-  `Unit.segments` is the line's text and math interleaved in document order, so
-  a line with two expressions emits both in place with no duplication. All
-  context is bounded to ≤40 runes (word-snapped, ellipsis if truncated):
-  the line's leading text keeps its tail, trailing text keeps its head, long
-  between-expression text keeps both ends with an elided middle. `before`/
-  `after` add the nearest prose from adjacent non-math lines (crossing blank
-  lines) ONLY on a side with no same-line text — so a display block alone on
-  its line gets neighbor context, but an inline formula in a sentence is
-  anchored by its own line and does not also pull in neighbors. Lines with no
-  math contribute no unit.
+- Responsibility: Scan a markdown string for LaTeX math and return a flat,
+  ordered stream of all text and math in the input. Return type:
+  `Vec<Segment>` where each `Segment` is either `Text(String)` or
+  `Math { expr: String, display: bool }`, in document order, with newlines
+  preserved. Recognized delimiters: `$$...$$` and `\[...\]` (display=true);
+  `$...$` and `\(...\)` (display=false). `\$` is a literal dollar. `\\`
+  prevents the following `$` from opening math. Unterminated and empty spans
+  are treated as literal text. Multi-line display blocks are supported.
+  Text on lines with no math is emitted as `Text` segments unchanged — nothing
+  is dropped. No trimming, no anchor windowing, no neighbor-context logic.
+  Returns an empty vec only for empty input.
 - No dependencies on other laterm modules.
 
 **`render`**
@@ -207,8 +209,8 @@ src/
   kitty graphics protocol. PNG (`f=100`) transmitted in ≤4096-byte base64
   chunks via `ESC _ G ... ESC \` APC escapes, displayed at the cursor (`a=T`).
   `supported()` checks `KITTY_WINDOW_ID`, `TERM` containing `kitty`/`ghostty`,
-  or `TERM_PROGRAM == "ghostty"`. `encode(png)`: native size.
-  `encode_inline(png)`: adds `r=1` (one text row).
+  or `TERM_PROGRAM == "ghostty"`. `encode(png: &[u8], rows: u32)`: emits
+  `a=T,f=100,r=<rows>` — the caller always supplies the proportional row count.
 - Uses `base64` crate.
 - No dependencies on other laterm modules.
 
@@ -216,9 +218,9 @@ src/
 - Responsibility: Detect iTerm2/WezTerm imgcat support and encode PNG bytes as
   the iTerm2 OSC 1337 inline-image escape sequence.
   `supported()` checks `TERM_PROGRAM == "iTerm.app"`, `LC_TERMINAL == "iTerm2"`,
-  or `TERM_PROGRAM == "WezTerm"`. `encode(png)`: native-size sequence —
-  `ESC ] 1337 ; File=inline=1;size=<len>:<base64> BEL`. `encode_inline(png)`:
-  same with `height=1;preserveAspectRatio=1`.
+  or `TERM_PROGRAM == "WezTerm"`. `encode(png: &[u8], rows: u32)`: emits
+  `ESC ] 1337 ; File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64> BEL`,
+  where `rows` is in terminal cells (the proportional row count from `main`).
 - Uses `base64` crate.
 - No dependencies on other laterm modules.
 
@@ -227,16 +229,17 @@ src/
   sequence. `supported()` sends a DA1 query (`\x1b[c`) via `termbg`'s shared
   `query_terminal()` helper and returns true when attribute `4` appears in the
   `\x1b[?<attrs>c` reply (`parse_da1`). The helper handles raw-tty/Console API
-  setup on both unix and Windows, so DA1 works on Windows Terminal. `encode(png)`
-  decodes the PNG to RGBA8 using the `png` crate, then emits a standard Sixel
-  stream: DCS introducer + 1:1 raster attributes, RGB color registers scaled to
-  0–100, 6-row bands with per-color RLE. Colors are collected directly from the
-  pixels (with progressive bit-dropping when the palette would exceed 256
-  registers) — no quantization crate is used. `encode_inline(png)` is identical
-  to `encode` (Sixel has no cell-based scaling equivalent to kitty's `r=1`).
-  The renderer uses an **opaque** background (terminal color or white) for the
-  Sixel path, because Sixel transparency is less universally honored than the
-  transparent path kitty/imgcat use.
+  setup on both unix and Windows, so DA1 works on Windows Terminal.
+  `encode(png: &[u8], rows: u32)` decodes the PNG to RGBA8 using the `png`
+  crate, then emits a standard Sixel stream: DCS introducer + 1:1 raster
+  attributes, RGB color registers scaled to 0–100, 6-row bands with per-color
+  RLE. Colors are collected directly from the pixels (with progressive
+  bit-dropping when the palette would exceed 256 registers) — no quantization
+  crate is used. The `rows` parameter is currently **ignored** — Sixel has no
+  cell-based row scaling, so the image renders at its native pixel size (known
+  limitation; see section 5). The renderer uses an **opaque** background
+  (terminal color or white) for the Sixel path, because Sixel transparency is
+  less universally honored than the transparent path kitty/imgcat use.
 - Uses `png` crate (decode) and `termbg::query_terminal` (DA1 probe).
   The Sixel encoder itself is in-house and dependency-free (no sixel or
   quantization crate).
@@ -359,34 +362,35 @@ complete. Organized by component, in implementation priority order.
 
 ### Math scanner (Priority 2)
 
-- `$\sigma$` → one unit containing one inline math segment `"\sigma"`.
-- `$$\int_0^1 f(x)\,dx$$` → one unit with one display math segment; multi-line
-  spans supported; trailing text on the closing line is kept as a text segment.
-- `\(\sigma\)` → inline; `\[...\]` → display.
+- `$\sigma$` → a `Text` segment for any surrounding text plus one inline
+  `Math` segment `"\sigma"`, in document order.
+- `$$\int_0^1 f(x)\,dx$$` → a display `Math` segment; multi-line spans
+  supported; trailing text on the closing line is emitted as a `Text` segment
+  immediately after.
+- `\(\sigma\)` → inline math; `\[...\]` → display math.
 - `\$` is treated as a literal dollar and does not open a math span.
 - Empty expressions (e.g. `$$`) and unterminated spans are treated as literal
-  text (no unit emitted if that leaves the input math-free).
-- Two expressions on one line produce a SINGLE unit with both math segments in
-  order, interleaved with their surrounding text — no duplication.
-- Leading/between/trailing text on a math line is preserved as text segments;
-  whole lines with no math are dropped; `scan` returns empty if the input has
-  no math.
-- The formula's own-line text is bounded to ≤40 runes per side (a long sentence
-  containing a formula does not echo in full).
-- `before`/`after` carry the nearest prose from adjacent non-math lines
-  (crossing blank lines), bounded to ≤40 runes, and are populated only on a
-  side lacking same-line text. A display block alone on its line picks up the
-  prose from the preceding/following lines; an inline formula in a sentence does
-  not.
+  text and emitted as `Text` segments.
+- Two expressions on one line appear as two `Math` segments in document order,
+  interleaved with the text between them — no duplication.
+- Text on lines with no math is emitted verbatim as `Text` segments; no line
+  or segment is dropped. `scan` returns an empty vec only for empty input.
+- Newlines in the input are preserved in `Text` segments — the output is a
+  faithful interleaved representation of the full input.
 
 ### Renderer (Priority 3)
 
 - `render::render` returns `Err` on RaTeX parse or render failure; the process
   does not exit.
 - A PNG exceeding 4096×4096 px returns `ImageTooLarge`.
-- `render::render` returns the rendered image height; `main` renders a reference
-  capital letter once and treats expressions whose height is ≥ 1.5× that as
-  block (own line), shorter ones as inline (one text row).
+- `render::render` returns the rendered image height in pixels. `main` renders
+  a reference capital "X" once at startup (default 42 px if it fails). This
+  single reference value drives two things: (1) expressions whose height is
+  ≥ 1.5× the reference are laid out as **block** (own line); shorter expressions
+  are laid out **inline** (in flow). (2) For every image, `rows = max(1,
+  round(png_height_px / reference_X_height_px × 1.25))` is passed to
+  `encode(png, rows)`, so displayed height scales proportionally to terminal text
+  size (the `1.25` `ROW_SCALE` is a legibility bump).
 - On any error from `render::render`, `main` logs at debug and passes the raw
   LaTeX through (delimited) rather than dropping it.
 
@@ -398,18 +402,17 @@ complete. Organized by component, in implementation priority order.
   (`TERM_PROGRAM == "iTerm.app"`, `LC_TERMINAL == "iTerm2"`,
   `TERM_PROGRAM == "WezTerm"`), else Sixel when `sixel::supported()` (DA1
   reply contains attribute `4`), else `None`.
-- `imgcat::encode(png)` begins with `\x1b]1337;File=inline=1;` and ends with
-  `\a` (BEL); `encode_inline(png)` adds `height=1;preserveAspectRatio=1`.
-- `kitty::encode(png)` emits one or more `\x1b_G…\x1b\\` APC escapes (first
-  with `a=T,f=100`), base64 PNG in ≤4096-byte chunks, final chunk `m=0`;
-  `encode_inline(png)` adds `r=1` (one text row).
+- `imgcat::encode(png, rows)` emits `\x1b]1337;File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64>\a` (BEL), where `rows` is the proportional terminal-cell row count.
+- `kitty::encode(png, rows)` emits one or more `\x1b_G…\x1b\\` APC escapes
+  (first with `a=T,f=100,r=<rows>`), base64 PNG in ≤4096-byte chunks, final
+  chunk `m=0`. `rows` is always present — it is the proportional row count.
 - `termbg::query` parses an OSC 11 reply (`rgb:RRRR/GGGG/BBBB`) to RGB;
   `is_dark` thresholds on relative luminance.
 
 ### Cross-cutting
 
-- Nothing appears on stdout except graphics-protocol escape sequences (kitty,
-  imgcat, or Sixel) and their anchor text.
+- Nothing appears on stdout except verbatim conversation text and
+  graphics-protocol escape sequences (kitty, imgcat, or Sixel).
 - Log output always goes to a file (mode 0600, append). Default path:
   `laterm.log` beside the executable (falls back to cwd). Overridden by
   `--log-file <PATH>`. If the file cannot be opened, one warning goes to stderr
@@ -448,12 +451,12 @@ Claude Code process
 
 [mathscan::scan]
   |
-  | Vec<Unit{before, segments, after}> — one unit per math-bearing line
-  | (empty when no math found — these entries produce no output)
+  | Vec<Segment> — flat, document-order interleaving of Text and Math segments
+  | (newlines preserved; math-free text is included, not dropped)
   v
 
-for each unit: write before anchor line, then walk segments in order:
-  Text segment  -> write text inline
+walk flat segment list in order:
+  Text segment  -> write text verbatim (newlines included)
   Math segment  -> [render::render] -> Result<(png_bytes, height), _>
                      |
                      +-- ratex_parser::parse
@@ -462,14 +465,15 @@ for each unit: write before anchor line, then walk segments in order:
                      |     size cap: 4096×4096 px → ImageTooLarge
                      |     on Err: pass through raw LaTeX (delimited)
                      v
-                  height >= threshold ? proto.encode (block, own line)
-                                      : proto.encode_inline (inline, 1 row)
+                  rows = max(1, round(height / reference_X_height × 1.25))
+                  height >= 1.5× reference_X_height ?
+                      block layout: newline + proto.encode(png, rows) + newline
+                    : inline layout: proto.encode(png, rows) in flow
                   (proto = kitty if available, else imgcat, else sixel;
                    glyph color contrasts the detected terminal background;
-                   sixel path uses opaque background)
-  then write after anchor line
+                   sixel path uses opaque background; sixel ignores rows — native size)
 
-stdout: anchor context + the unit's text and images in document order
+stdout: full conversation text + rendered images in document order
 ```
 
 ---
@@ -490,13 +494,19 @@ stdout: anchor context + the unit's text and images in document order
 - **Polling, not inotify.** The watcher uses a 500 ms polling interval. Math in
   a conversation entry may appear up to 500 ms after it is written.
 
+- **Sixel does not scale to terminal cell size.** kitty and imgcat use the
+  proportional `rows` value to adapt image height to the terminal's cell
+  dimensions. The Sixel encoder ignores `rows` and renders at native pixel
+  size. Sixel cell-based scaling is a planned improvement.
+
 ---
 
 ## 6. Prototype
 
 The original Go implementation lives under `prototype/`. It validated the
-design — the watch/tail logic, mathscan windowing rules, sparse-feed semantics,
-kitty/imgcat escape formats, and OSC 11 contrast detection are all carried
-forward unchanged in the Rust implementation. The prototype still builds (see
-`prototype/Makefile`) and is the reference for behavior details. It is not part
-of the Rust build and is not the shipped tool.
+watch/tail logic, kitty/imgcat escape formats, and OSC 11 contrast detection —
+those are carried forward in the Rust implementation. The Rust implementation
+diverges from the prototype's sparse-feed/anchor-window mathscan model: it
+echoes the full transcript verbatim instead of emitting only math-bearing lines.
+The prototype still builds (see `prototype/Makefile`) and is kept for reference.
+It is not part of the Rust build and is not the shipped tool.
