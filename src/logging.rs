@@ -64,6 +64,10 @@ pub fn init(path: &Path, min_level: Level) {
     }
 }
 
+/// Open the log file for append, with an EXCLUSIVE-writer claim so two laterm
+/// instances can't clobber one shared file. Read-only access (e.g. `tail -f`)
+/// is still allowed. A second writer fails here; `init` reports it and leaves
+/// logging disabled for that instance.
 fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut opts = OpenOptions::new();
     opts.create(true).append(true);
@@ -73,8 +77,30 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
+    #[cfg(windows)]
+    {
+        // FILE_SHARE_READ: other processes may open for reading, not writing.
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0x0000_0001);
+    }
 
-    opts.open(path)
+    let file = opts.open(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // Advisory exclusive lock, non-blocking: a second laterm fails fast.
+        // Readers don't flock, so tailing the log is unaffected. Released when
+        // the file (and the process) closes.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "already held by another laterm instance",
+            ));
+        }
+    }
+
+    Ok(file)
 }
 
 /// Write a log line if the logger is initialised and the level passes.
@@ -107,3 +133,28 @@ pub fn info(msg: &str)  { log(Level::Info,  msg); }
 pub fn warn(msg: &str)  { log(Level::Warn,  msg); }
 #[allow(dead_code)]
 pub fn error(msg: &str) { log(Level::Error, msg); }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_writer_is_locked_out() {
+        let path = std::env::temp_dir().join(format!("laterm-lock-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let first = open_log_file(&path).expect("first open should succeed");
+        assert!(
+            open_log_file(&path).is_err(),
+            "a second writer must fail while the first holds the lock"
+        );
+
+        drop(first); // releasing the fd releases the flock
+        assert!(
+            open_log_file(&path).is_ok(),
+            "open should succeed once the lock is released"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+}

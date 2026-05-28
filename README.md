@@ -71,12 +71,12 @@ not accepted — ordinary keystrokes produce a beep.
 ## Usage / Options
 
 ```
-laterm [--log-file <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 ```
 
 | Flag | Description |
 |---|---|
-| `--log-file <PATH>` | Write diagnostics to PATH instead of the default location. |
+| `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |
 | `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
 | `--help`, `-h` | Print usage and exit. |
 
@@ -108,14 +108,19 @@ less universally honored.)
 
 | Variable | Values | Description |
 |---|---|---|
-| `LATERM_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | Log verbosity. Default: `info`. |
+| `LATERM_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | Log verbosity when `--log` is given. Default: `info`. |
 
-LaTerm always writes diagnostics to a log file (keeping the rendered terminal
-feed clean). The default path is `laterm.log` beside the executable, falling
-back to the current working directory if the executable path is unavailable.
-Override it with `--log-file <PATH>`. The file is opened for append at mode
-0600 (unix). Only fatal pre-exit messages go to stderr. Raw conversation
-content is only logged at `debug` level.
+No logging by default — pass `--log <PATH>` to enable it. Both `--log <PATH>`
+and `--log=<PATH>` are accepted; a missing argument is a usage error. When
+enabled, the file is opened for append at mode 0600 (unix). If a second laterm
+instance targets the same path, it cannot acquire the exclusive writer lock:
+it prints one warning to stderr and continues running without logging (you can
+still `tail -f` the live log from a reader). Only fatal pre-exit messages go to
+stderr regardless. Raw conversation content is only logged at `debug` level.
+
+Multiple instances sharing one default log file was the reason logging became
+opt-in: nobody needs logs unless something is wrong, at which point you relaunch
+with `--log`.
 
 ## Rendering
 

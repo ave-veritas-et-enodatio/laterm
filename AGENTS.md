@@ -19,7 +19,7 @@ Windows Terminal, or any Sixel-capable terminal window:
 ```sh
 cargo run --release
 # or, if installed on PATH:
-laterm [--log-file <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 ```
 
 It spawns no child process. It derives the Claude Code log directory, tails
@@ -80,7 +80,7 @@ src/
 
 ### Module responsibilities in brief
 
-**`main`** — Wiring only. Parse CLI flags (`--log-file`, `--catch-up`,
+**`main`** — Wiring only. Parse CLI flags (`--log`, `--catch-up`,
 `--help`). Initialize logging. Derive the Claude Code log directory for the
 current working directory (`~/.claude/projects/<cwd-with-slashes-as-dashes>`).
 Select a graphics protocol via `graphics::select` and exit immediately with an
@@ -198,11 +198,16 @@ drop. Platform implementations:
 Used once at startup to pick a contrasting glyph color (`query`); `raw_input`
 is used by `main`'s manual-input read loop.
 
-**`logging`** — Configures structured, leveled logging. File output at mode
-0600, append. Path resolved by `main` from `--log-file` or the default beside
-the executable. Level controlled by `LATERM_LOG_LEVEL`. If the file cannot be
-opened, prints one warning to stderr and disables logging for the run. Never
-writes to stdout.
+**`logging`** — Configures structured, leveled logging. Logging is opt-in:
+path is resolved by `main` from `--log` only (no default). When a path is
+given, file output at mode 0600, append. Acquires an exclusive writer lock for
+the process lifetime (unix: advisory `flock(LOCK_EX | LOCK_NB)` via `libc`;
+windows: `share_mode(FILE_SHARE_READ)` via std `OpenOptionsExt` — no new
+dependency). A second instance that fails to acquire the lock prints one warning
+to stderr and disables logging for that instance; readers (e.g. `tail -f`) are
+unaffected. Level controlled by `LATERM_LOG_LEVEL` when logging is enabled.
+If the file cannot be opened, prints one warning to stderr and disables logging
+for the run. Never writes to stdout.
 
 ---
 
@@ -349,21 +354,28 @@ Current direct dependencies:
 | `png` v0.17 | `sixel` (PNG→RGBA decode; no sixel or quantization crate — encoder is in-house) |
 | `chrono` v0.4 | `main` (RFC3339 timestamp parsing for `--catch-up`) |
 | `ctrlc` v3 | `main` (cross-platform signal handling, MIT/Apache-2.0) |
-| `libc` v0.2 | `termbg` (unix only — `[target.'cfg(unix)']`) |
+| `libc` v0.2 | `termbg` (unix only — `[target.'cfg(unix)']`); `logging` (unix only) |
 | `windows-sys` v0.59 | `termbg` (Windows only — `[target.'cfg(windows)']`) |
 
 ---
 
 ## Logging
 
-- **Always writes to a log file** (keeps the rendered feed clean). Default
-  path: `laterm.log` beside the executable, falling back to cwd. Override with
-  `--log-file <PATH>`. If the file cannot be opened, one warning goes to stderr
-  and logging is disabled for the run.
+- **Opt-in only.** No logging by default. Pass `--log <PATH>` to enable it.
+  There is no default log path. Both `--log <PATH>` and `--log=<PATH>` are
+  accepted; a missing/empty argument is a usage error (exit non-zero).
 - **Never write to stdout.** stdout is reserved exclusively for the rendered
   feed written by `main`.
-- Log file is opened for append at mode 0600 (unix).
+- Log file is opened for append at mode 0600 (unix). An exclusive writer lock
+  is held for the process lifetime (unix: advisory `flock(LOCK_EX | LOCK_NB)`
+  via `libc`; windows: `share_mode(FILE_SHARE_READ)` via std). A second
+  instance pointed at the same path fails to acquire the lock, prints one
+  warning to stderr, and continues running without logging. Read-only access
+  (e.g. `tail -f`) is unaffected on both platforms.
+- If the file cannot be opened, one warning goes to stderr and logging is
+  disabled for the run.
 - Level set via `LATERM_LOG_LEVEL` (debug, info, warn, error). Default: info.
+  Applies only when logging is enabled.
 - Initialize logging early in `main` before any other work.
 
 ---
