@@ -197,6 +197,11 @@ const BEEP_THROTTLE: Duration = Duration::from_millis(250);
 /// Timed-read interval for the raw-input loop; bounds shutdown latency.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Tracks whether the last thing written to stdout was a manual separator
+/// (Enter in the viewing window). Real content (`emit_text`) clears it; the
+/// read loop refuses to stack a second separator and beeps instead.
+static LAST_WAS_SEPARATOR: AtomicBool = AtomicBool::new(false);
+
 /// Read manual input PASTE-ONLY: pasted text is captured silently (terminal
 /// echo is off) and rendered through the same path as a conversation entry;
 /// ordinary typing is ignored with a throttled BEL. Escape sequences (arrow
@@ -238,18 +243,43 @@ fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdow
                     let _lock = out_mu.lock().unwrap();
                     emit_text(&s, block_threshold, ref_height, &proto);
                 }
-                Some(PasteEvent::RejectTyping) => {
-                    if last_beep.is_none_or(|t| t.elapsed() >= BEEP_THROTTLE) {
-                        beep();
-                        last_beep = Some(Instant::now());
+                Some(PasteEvent::Newline) => {
+                    let _lock = out_mu.lock().unwrap();
+                    // Enter inserts a deliberate separator (rule line). Refuse
+                    // to stack a second one in a row — beep instead.
+                    if LAST_WAS_SEPARATOR.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        throttled_beep(&mut last_beep);
+                    } else {
+                        write_separator();
                     }
                 }
+                Some(PasteEvent::RejectTyping) => throttled_beep(&mut last_beep),
                 None => {}
             }
         }
     }
 
     disable_bracketed_paste();
+}
+
+/// Emit one BEL, at most once per `BEEP_THROTTLE`, to avoid machine-gunning the
+/// bell on a held key.
+fn throttled_beep(last_beep: &mut Option<Instant>) {
+    if last_beep.is_none_or(|t| t.elapsed() >= BEEP_THROTTLE) {
+        beep();
+        *last_beep = Some(Instant::now());
+    }
+}
+
+/// Write a deliberate visual separator: a blank line, a terminal-width rule of
+/// `=`, and a trailing newline. Caller holds the output mutex.
+fn write_separator() {
+    let rule = "=".repeat(termbg::term_width());
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\n");
+    let _ = out.write_all(rule.as_bytes());
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
 }
 
 fn enable_bracketed_paste() {
@@ -275,6 +305,9 @@ fn beep() {
 enum PasteEvent {
     /// A complete bracketed paste; carries the inner (lossy-UTF8) text.
     PasteComplete(String),
+    /// The user pressed Enter/Return outside a paste — a request for a manual
+    /// separator.
+    Newline,
     /// The user typed (rather than pasted) printable input — to be rejected.
     RejectTyping,
 }
@@ -332,8 +365,11 @@ impl PasteParser {
         if byte == 0x1b {
             self.state = PasteState::StartMarker { matched: 1 };
             None
+        } else if byte == b'\n' || byte == b'\r' {
+            // Enter/Return: a request for a manual separator.
+            Some(PasteEvent::Newline)
         } else if byte < 0x20 {
-            // Control bytes (other than ESC): consume silently.
+            // Other control bytes: consume silently.
             None
         } else {
             // Printable ASCII or UTF-8 lead/continuation byte: typed input.
@@ -402,6 +438,9 @@ fn emit_text(
     if segs.is_empty() {
         return 0;
     }
+
+    // Real content breaks the manual-separator run, so the next Enter draws one.
+    LAST_WAS_SEPARATOR.store(false, std::sync::atomic::Ordering::Relaxed);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -740,8 +779,24 @@ mod tests {
     #[test]
     fn control_bytes_silent() {
         let mut p = PasteParser::new();
-        // Tab, CR, LF, Ctrl-C — none produce an event.
-        assert_eq!(feed_all(&mut p, b"\t\r\n\x03"), vec![]);
+        // Tab and Ctrl-C produce no event (CR/LF are Newline, tested separately).
+        assert_eq!(feed_all(&mut p, b"\t\x03"), vec![]);
+    }
+
+    #[test]
+    fn enter_yields_newline_outside_paste() {
+        let mut p = PasteParser::new();
+        assert_eq!(p.feed(b'\n'), Some(PasteEvent::Newline));
+        assert_eq!(p.feed(b'\r'), Some(PasteEvent::Newline));
+    }
+
+    #[test]
+    fn newlines_inside_paste_are_content_not_separators() {
+        let mut p = PasteParser::new();
+        assert_eq!(
+            feed_all(&mut p, b"\x1b[200~a\nb\rc\x1b[201~"),
+            vec![PasteEvent::PasteComplete("a\nb\rc".to_string())]
+        );
     }
 
     #[test]
