@@ -46,11 +46,18 @@ on Mac: `make dequarantine` first
 ```bash
 git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
-make release
+make dist       # cross-build the per-platform binaries into dist/
+make install    # copy the right one to ~/bin/laterm
 ```
 
-The binary is written to `target/release/laterm`. Copy or symlink it onto your
-`PATH`.
+`make install` selects the binary for your OS from `dist/`, copies it to
+`~/bin/laterm` (override with `INSTALL_DIR=...`), and on macOS removes the
+quarantine attribute. It replaces any existing copy by removing it first (a
+fresh inode), which avoids a macOS code-signing cache quirk that otherwise
+`Killed:9`s an overwritten binary. Run `make dist` first so `dist/` is current.
+
+Alternatively, `make release` writes a single `target/release/laterm`; copy or
+symlink that onto your `PATH` yourself.
 
 Open a second terminal window (kitty, ghostty, iTerm2, WezTerm, Windows Terminal,
 or any Sixel-capable terminal), `cd` to the
@@ -180,6 +187,7 @@ make build    # debug build
 make release  # optimized build → target/release/laterm
 make test     # run unit tests
 make dist     # cross-build all three release targets into dist/
+make install  # copy the dist binary for this OS to ~/bin (INSTALL_DIR to override)
 ```
 
 Plain `cargo build --release` and `cargo test` work too. The root Makefile is

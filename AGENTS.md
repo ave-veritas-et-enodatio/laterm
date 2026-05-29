@@ -42,6 +42,8 @@ make test     # unit tests (cargo test)
 make check    # type-check all three release targets (validates cfg flags)
 make dist     # cross-build aarch64-apple-darwin, x86_64-unknown-linux-gnu,
               #   x86_64-pc-windows-gnu via cargo-zigbuild → dist/
+make install  # copy this OS's dist binary to ~/bin (INSTALL_DIR overrides);
+              #   rm-then-cp for a fresh inode + dequarantine on macOS
 make fmt      # cargo fmt
 make lint     # cargo clippy --all-targets
 make setup    # rustup targets + cargo-zigbuild (needs zig: brew install zig)
