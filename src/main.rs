@@ -26,21 +26,23 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_CATCH_UP_MINUTES: i64 = 5;
 
-const USAGE: &str = "\
-usage: laterm [options]
-
-Renders LaTeX math from the current Claude Code conversation log as inline
-terminal images.
-
-options:
-  --cwd <PATH>, -C      derive the watched log dir from PATH instead of the
-                        current working directory
-  --log <PATH>          write diagnostics to PATH (default: no logging)
-  --catch-up[=<MINS>]   render math from the last MINS minutes of history
-                        before tailing (bare flag = 5 minutes)
-  --version, -V         print version and exit
-  --help                show this help and exit
-";
+const USAGE: &str = concat!(
+    "laterm ", env!("CARGO_PKG_VERSION"), "\n",
+    "\n",
+    "usage: laterm [options]\n",
+    "\n",
+    "Renders LaTeX math from the current Claude Code conversation log as inline\n",
+    "terminal images.\n",
+    "\n",
+    "options:\n",
+    "  --cwd <PATH>, -C      derive the watched log dir from PATH instead of the\n",
+    "                        current working directory\n",
+    "  --log <PATH>          write diagnostics to PATH (default: no logging)\n",
+    "  --catch-up[=<MINS>]   render math from the last MINS minutes of history\n",
+    "                        before tailing (bare flag = 5 minutes)\n",
+    "  --version, -V         print version and exit\n",
+    "  --help                show this help and exit\n",
+);
 
 struct Args {
     cwd: Option<PathBuf>,
