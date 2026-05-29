@@ -78,6 +78,10 @@ fn rows_for(height_px: u32, ref_px: u32) -> u32 {
     ((height_px as f32 / ref_px as f32 * ROW_SCALE).round() as u32).max(1)
 }
 
+/// Multiple of the reference X height at/above which a rendered expression is
+/// laid out as a block (its own line) rather than inline in the text flow.
+const BLOCK_THRESHOLD_RATIO: f32 = 1.5;
+
 /// Render context shared by every emit: the reference-X-derived sizing and the
 /// selected output protocol. Built once in `main` (the reference "X" is rendered
 /// exactly once) and threaded through `emit_entry` so the same three values
@@ -93,11 +97,12 @@ pub(crate) struct RenderCtx {
 
 impl RenderCtx {
     /// Build the context: render the reference "X" once to derive the reference
-    /// height and the 1.5× block threshold, and capture the chosen protocol.
+    /// height and the block threshold (`BLOCK_THRESHOLD_RATIO`×), and capture the
+    /// chosen protocol.
     pub(crate) fn new(proto: Arc<graphics::Protocol>) -> RenderCtx {
         let ref_height = reference_height();
         RenderCtx {
-            block_threshold: ref_height * 3 / 2,
+            block_threshold: (ref_height as f32 * BLOCK_THRESHOLD_RATIO) as u32,
             ref_height,
             proto,
         }
