@@ -69,14 +69,16 @@ run-build: build
 INSTALL_DIR ?= $(HOME)/bin
 OS := $(shell uname -s)
 install:
-	@echo "Installing $(OS) version to $(INSTALL_DIR)"
 	@[[ -d "$(INSTALL_DIR)" ]] || mkdir -pv "$(INSTALL_DIR)"
 	@case "$(OS)" in \
-	Darwin) /bin/rm -f "$(INSTALL_DIR)/laterm"; \
+	Darwin) echo "Installing $(OS) version to $(INSTALL_DIR) and dequarantining."; \
+		      /bin/rm -f "$(INSTALL_DIR)/laterm"; \
 	        cp -v dist/laterm-aarch64-apple-darwin "$(INSTALL_DIR)/laterm"; \
 					xattr -d com.apple.quarantine "$(INSTALL_DIR)/laterm" 2> /dev/null || true;; \
-	Linux) cp -vf dist/laterm-x86_64-unknown-linux-gnu "$(INSTALL_DIR)/laterm";; \
-	*) cp -vf dist/laterm-x86_64-pc-windows-gnu.exe "$(INSTALL_DIR)/laterm.exe";; \
+	Linux) echo "Installing $(OS) version to $(INSTALL_DIR)"; \
+	      cp -vf dist/laterm-x86_64-unknown-linux-gnu "$(INSTALL_DIR)/laterm";; \
+	*) echo "Installing $(OS) version to $(INSTALL_DIR)"; \
+	    cp -vf dist/laterm-x86_64-pc-windows-gnu.exe "$(INSTALL_DIR)/laterm.exe";; \
 	esac
 
 dequarantine:

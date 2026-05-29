@@ -33,6 +33,7 @@ options:
   --log <PATH>          write diagnostics to PATH (default: no logging)
   --catch-up[=<MINS>]   render math from the last MINS minutes of history
                         before tailing (bare flag = 5 minutes)
+  --version, -V         print version and exit
   --help                show this help and exit
 ";
 
@@ -41,9 +42,17 @@ struct Args {
     catch_up: Option<i64>,
 }
 
-/// Parse argv (excluding the program name). On `--help` returns Ok(None) after
-/// the caller is expected to print usage. On error returns Err with a message.
-fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
+/// The outcome of parsing argv: run with the given args, show help, or show
+/// version. Help and version are distinct terminal actions, both exiting 0.
+enum Invocation {
+    Run(Args),
+    Help,
+    Version,
+}
+
+/// Parse argv (excluding the program name). Returns the [`Invocation`] to
+/// perform, or Err with a message on a malformed argument.
+fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
     let mut args = Args {
         log: None,
         catch_up: None,
@@ -52,7 +61,9 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, St
 
     while let Some(arg) = it.next() {
         if arg == "--help" || arg == "-h" {
-            return Ok(None);
+            return Ok(Invocation::Help);
+        } else if arg == "--version" || arg == "-V" {
+            return Ok(Invocation::Version);
         } else if arg == "--log" {
             let path = it.next().ok_or("--log requires a path argument")?;
             args.log = Some(PathBuf::from(path));
@@ -76,7 +87,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, St
         }
     }
 
-    Ok(Some(args))
+    Ok(Invocation::Run(args))
 }
 
 fn main() {
@@ -85,9 +96,13 @@ fn main() {
 
 fn run() -> i32 {
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(Some(a)) => a,
-        Ok(None) => {
+        Ok(Invocation::Run(a)) => a,
+        Ok(Invocation::Help) => {
             print!("{USAGE}");
+            return 0;
+        }
+        Ok(Invocation::Version) => {
+            println!("laterm {}", env!("CARGO_PKG_VERSION"));
             return 0;
         }
         Err(e) => {
@@ -738,31 +753,46 @@ mod tests {
         a.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Unwrap a successful parse to its `Args`, panicking on any other outcome.
+    fn run_args(argv: Vec<String>) -> Args {
+        match parse_args(argv) {
+            Ok(Invocation::Run(a)) => a,
+            _ => panic!("expected Invocation::Run"),
+        }
+    }
+
     #[test]
     fn no_args_defaults() {
-        let a = parse_args(argv(&[])).unwrap().unwrap();
+        let a = run_args(argv(&[]));
         assert!(a.log.is_none());
         assert!(a.catch_up.is_none());
     }
 
     #[test]
-    fn help_returns_none() {
-        assert!(parse_args(argv(&["--help"])).unwrap().is_none());
+    fn help_returns_help_variant() {
+        assert!(matches!(parse_args(argv(&["--help"])), Ok(Invocation::Help)));
+        assert!(matches!(parse_args(argv(&["-h"])), Ok(Invocation::Help)));
+    }
+
+    #[test]
+    fn version_returns_version_variant() {
+        assert!(matches!(parse_args(argv(&["--version"])), Ok(Invocation::Version)));
+        assert!(matches!(parse_args(argv(&["-V"])), Ok(Invocation::Version)));
     }
 
     #[test]
     fn log_space_and_equals_forms() {
-        let a = parse_args(argv(&["--log", "/tmp/x.log"])).unwrap().unwrap();
+        let a = run_args(argv(&["--log", "/tmp/x.log"]));
         assert_eq!(a.log, Some(PathBuf::from("/tmp/x.log")));
-        let b = parse_args(argv(&["--log=/tmp/y.log"])).unwrap().unwrap();
+        let b = run_args(argv(&["--log=/tmp/y.log"]));
         assert_eq!(b.log, Some(PathBuf::from("/tmp/y.log")));
     }
 
     #[test]
     fn catch_up_bare_and_explicit() {
-        let bare = parse_args(argv(&["--catch-up"])).unwrap().unwrap();
+        let bare = run_args(argv(&["--catch-up"]));
         assert_eq!(bare.catch_up, Some(DEFAULT_CATCH_UP_MINUTES));
-        let explicit = parse_args(argv(&["--catch-up=20"])).unwrap().unwrap();
+        let explicit = run_args(argv(&["--catch-up=20"]));
         assert_eq!(explicit.catch_up, Some(20));
     }
 
