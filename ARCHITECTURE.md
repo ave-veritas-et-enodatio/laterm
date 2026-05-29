@@ -448,7 +448,8 @@ complete. Organized by component, in implementation priority order.
 ### Sidecar startup (Priority 1)
 
 - `laterm` spawns no child process. Accepted flags: `-C`/`--cwd <PATH>`,
-  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`.
+  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes), `--version`/`-V`,
+  `--help`/`-h`.
   Unknown flags or a missing/empty `--log`, `--cwd`, or `-C` argument exit
   non-zero with a usage message to stderr.
 - `-C`/`--cwd <PATH>` sets the working directory used to derive the watched log

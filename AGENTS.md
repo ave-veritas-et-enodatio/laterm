@@ -19,7 +19,7 @@ Windows Terminal, or any Sixel-capable terminal window:
 ```sh
 cargo run --release
 # or, if installed on PATH:
-laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
 ```
 
 It spawns no child process. It derives the Claude Code log directory, tails

@@ -34,7 +34,7 @@ is no Unicode text fallback.
 
 ```bash
 # pick the binary for your platform
-./dist/laterm-laterm-aarch64-apple-darwin
+./dist/laterm-aarch64-apple-darwin
 ./dist/laterm-x86_64-pc-windows-gnu.exe
 ./dist/laterm-x86_64-unknown-linux-gnu
 ```
@@ -79,7 +79,7 @@ Both markers and body tint are readable in light and dark themes.
 ## Usage / Options
 
 ```
-laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
 ```
 
 | Flag | Description |
@@ -87,6 +87,7 @@ laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 | `--cwd <PATH>`, `-C` | Derive the watched log directory from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
 | `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |
 | `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
+| `--version`, `-V` | Print version and exit. |
 | `--help`, `-h` | Print usage and exit. |
 
 At startup laterm prints one plain-color line — `laterm <version> monitoring
