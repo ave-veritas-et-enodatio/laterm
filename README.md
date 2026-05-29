@@ -70,9 +70,11 @@ not accepted — ordinary keystrokes produce a beep. Pressing Enter/Return inser
 rule of `═` (U+2550) characters in bold yellow, then a newline — to manually
 divide topics in the rendered feed; pressing Enter again without any rendered
 content in between just beeps (rules do not stack). Each rendered entry is
-prefixed with a color-coded role marker: `(u)>` (bold green) for your prompts,
-`[a]>` (bold cyan) for assistant replies, and `{p}>` (bold magenta) for pasted
-text, making the feed easy to scan at a glance.
+bracketed by a matched pair of color-coded role markers — opening `(u)>` / closing
+`<(u)` (bold green) for your prompts, `[a]>` / `<[a]` (bold cyan) for assistant
+replies, `{p}>` / `<{p}` (bold magenta) for pasted text — and the body text is
+tinted in the role's color (green / cyan / magenta) for at-a-glance scanning.
+Both markers and body tint are readable in light and dark themes.
 
 ## Usage / Options
 
@@ -100,9 +102,10 @@ laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
    preference order). If rendering fails, the raw LaTeX is passed through as text.
 
 Output is a **full echo**: the conversation text is mirrored verbatim, with each
-math expression rendered as an image in place. Each entry is prefixed with a
-color-coded role marker — `(u)>` for user entries, `[a]>` for assistant entries,
-`{p}>` for pasted text — and followed by a blank-line separator. A small expression (single symbol,
+math expression rendered as an image in place. Each entry is bracketed by a
+matched open/close role marker pair — `(u)>` / `<(u)` for user entries, `[a]>` /
+`<[a]` for assistant entries, `{p}>` / `<{p}` for pasted text — with the body
+text tinted in the role's color, and followed by a blank-line separator. A small expression (single symbol,
 simple sub/superscript) renders inline in the text flow; a tall one (fraction,
 integral, summation) renders on its own line. Image size scales proportionally to
 the terminal's text, so math sits naturally alongside the prose. At startup

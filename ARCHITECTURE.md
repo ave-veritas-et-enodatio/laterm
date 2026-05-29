@@ -59,14 +59,24 @@ blocking defect.
    line (newline before + image + newline). A shorter expression stays **inline**
    in the text flow. Both layouts call the same `encode(png, rows)`. Each emitted
    entry (one jsonl conversation entry, or one paste) is prefixed with a
-   color-coded role marker emitted once per entry — not per line: `(u)> ` (bold
-   green) for user entries, `[a]> ` (bold cyan) for assistant/agent entries,
-   `{p}> ` (bold magenta) for manually pasted text. Markers use ANSI SGR escapes
-   from the basic 8-color palette (e.g. `\x1b[1;32m…\x1b[0m`) so they track the
-   user's terminal color scheme; color is reset before the entry's content so
-   prose keeps the terminal's default foreground. Entries with no renderable
-   content emit nothing (no marker). Each entry is followed by a single blank-line
-   separator. Only the `main` module writes to stdout (role markers included).
+   matched pair of bold, color-coded role markers — one per entry, not per line:
+   opening `(u)> ` / closing `<(u)` (bold green) for user entries, `[a]> ` /
+   `<[a]` (bold cyan) for assistant/agent entries, `{p}> ` / `<{p}` (bold
+   magenta) for manually pasted text. The closing marker is appended inline at
+   the end of the entry's last line (separated by a space) when content ends
+   mid-line; when the entry ends in a tall/block image the closing marker falls to
+   its own line. The entry's prose is rendered in the role's non-bold color (user:
+   green `\x1b[32m`; assistant: cyan `\x1b[36m`; paste: magenta `\x1b[35m`) —
+   the terminal carries the SGR color across its own soft-wraps, so the whole
+   entry stays tinted at any scroll position with no wrapping logic in laterm.
+   Bold markers are the primary role signal (and a colorblind backstop); the body
+   tint is a secondary mid-entry orientation cue. Math images are not tinted —
+   they render neutral per the contrast logic. The color is reset before the
+   blank-line separator, so separators stay untinted. Markers use ANSI SGR escapes
+   from the basic 8-color palette so they track the user's terminal color scheme
+   rather than imposing fixed hues. Entries with no renderable content emit
+   nothing (no marker). Each entry is followed by a single blank-line separator.
+   Only the `main` module writes to stdout (role markers included).
 
 **Resilience**
 
@@ -160,18 +170,28 @@ src/
   `ESC[200~` … `ESC[201~` and processed through the same conversation path —
   prose mirrored verbatim, delimited math rendered in place (inline vs block by
   height, proportional `rows` sizing). Multi-line pastes are handled as one
-  entry. Before emitting each entry's content, `main` writes a color-coded role
-  marker: `(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> ` (bold
-  cyan, `\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
-  `\x1b[1;35m`) for pasted text. The role is derived from the conversation
-  entry's `role` field (`user` → user marker; anything else → assistant marker);
-  pasted text always uses the paste marker. Markers use ANSI SGR escapes from
-  the basic 8-color palette, chosen so they track the user's terminal color
-  scheme rather than imposing fixed truecolor values; the color is reset
-  (`\x1b[0m`) before the entry's content so prose keeps the terminal's default
-  foreground. One marker per entry — not per line. Entries with no renderable
-  content emit nothing (no marker). Each entry is followed by a single blank-line
-  separator. Pressing Enter/Return writes a visual separator to stdout: a blank
+  entry. Each entry is bracketed by a matched pair of bold, color-coded role
+  markers. Opening: `(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> `
+  (bold cyan, `\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
+  `\x1b[1;35m`) for pasted text. Closing (mirrored): `<(u)`, `<[a]`, `<{p}` —
+  same bold color. The closing marker is appended inline at the end of the
+  entry's last line (separated by a space) when content ends mid-line; when the
+  entry ends in a tall/block image (cursor already at column start) the closing
+  marker falls to its own line. The entry's prose is rendered in the role's
+  non-bold color (`\x1b[32m` / `\x1b[36m` / `\x1b[35m`) — the terminal carries
+  the SGR color across its own soft-wraps, so the whole entry stays tinted
+  without any wrapping logic in laterm. Bold markers are the primary role signal
+  (and a colorblind backstop); the body tint is a secondary mid-entry orientation
+  cue. Math images are not tinted — they render neutral per the contrast logic.
+  The color is reset before the blank-line separator, so separators stay
+  untinted. Markers use the basic 8-color ANSI SGR palette (bold `\x1b[1;3Xm`
+  for markers, non-bold `\x1b[3Xm` for body; 32/36/35 = green/cyan/magenta),
+  chosen so they track the user's terminal color scheme rather than imposing
+  fixed hues. Role is derived from the conversation entry's `role` field
+  (`user` → user marker; anything else → assistant marker); pasted text always
+  uses the paste marker. One marker-pair per entry — not per line. Entries with
+  no renderable content emit nothing (no marker). Each entry is followed by a
+  single blank-line separator. Pressing Enter/Return writes a visual separator to stdout: a blank
   line, then a terminal-width rule of `═` (U+2550, box-drawings double-horizontal)
   characters in bold yellow (`\x1b[1;33m`), then a newline (width from
   `termbg::term_width()`, falling back to 80 columns). Debounce: if the last
@@ -399,9 +419,13 @@ complete. Organized by component, in implementation priority order.
   into the window is captured silently between the bracketed-paste markers and
   rendered through the same path as a conversation entry (full echo: prose
   verbatim, delimited math rendered in place). Each rendered entry — conversation
-  or paste — is prefixed with a role marker (`(u)> ` bold green, `[a]> ` bold
-  cyan, `{p}> ` bold magenta) and followed by a single blank-line separator; the
-  marker is written once per entry, color reset before content, basic-ANSI palette.
+  or paste — is bracketed by a matched role marker pair (opening `(u)> ` / closing
+  `<(u)` bold green, `[a]> ` / `<[a]` bold cyan, `{p}> ` / `<{p}` bold
+  magenta); the closing marker is appended inline at the end of the last line, or
+  on its own line when the entry ends with a block image. The entry's prose is
+  tinted in the role's non-bold color; math images render neutral. Color is reset
+  before the blank-line separator. One marker-pair per entry, basic-ANSI palette,
+  followed by a single blank-line separator.
   Pressing Enter/Return writes a separator to stdout: a blank line, a
   terminal-width rule of `═` (U+2550) characters in bold yellow (width via
   `termbg::term_width()`, default 80), and a newline. If the last output was
@@ -478,9 +502,10 @@ complete. Organized by component, in implementation priority order.
 
 ### Cross-cutting
 
-- Nothing appears on stdout except ANSI role markers, verbatim conversation
-  text, graphics-protocol escape sequences (kitty, imgcat, or Sixel), blank-line
-  entry separators, and the `═` separator rule.
+- Nothing appears on stdout except ANSI role markers (open+close pair, bold),
+  role-tinted body text (non-bold), verbatim conversation text, graphics-protocol
+  escape sequences (kitty, imgcat, or Sixel), blank-line entry separators, and
+  the `═` separator rule.
 - No logging unless `--log <PATH>` is given (no default path). When enabled:
   mode-0600 append, exclusive writer lock held for the process lifetime. A
   second instance pointed at the same path fails to acquire the lock, prints
@@ -544,8 +569,10 @@ walk flat segment list in order:
                    glyph color contrasts the detected terminal background;
                    sixel path uses opaque background; sixel ignores rows — native size)
 
-per entry: role marker (basic-ANSI color) + full conversation text +
-            rendered images in document order + trailing blank line
+per entry: bold open marker + role-tinted body text (non-bold) +
+            rendered images in document order (images neutral) +
+            bold close marker (inline, or own-line if image-final) +
+            color reset + trailing blank line
 ```
 
 ---

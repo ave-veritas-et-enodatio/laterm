@@ -181,10 +181,10 @@ fn run() -> i32 {
             continue;
         }
         // All segments of one entry share a role; mark and separate per entry.
-        let marker = role_marker(&segs[0].role);
+        let style = role_style(&segs[0].role);
         let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
         let _lock = out_mu.lock().unwrap();
-        emit_entry(marker, &texts, block_threshold, ref_height, &proto);
+        emit_entry(style, &texts, block_threshold, ref_height, &proto);
     }
 
     0
@@ -202,14 +202,36 @@ const BEEP_THROTTLE: Duration = Duration::from_millis(250);
 /// Timed-read interval for the raw-input loop; bounds shutdown latency.
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Role-marker prefixes written before each emitted entry, so the feed is easy
-/// to scan: user, assistant/agent, and manually-pasted text. Each is ANSI
-/// color-coded (bold) for a stronger visual difference, with the glyphs
-/// distinct per role; the color is reset before the entry's content so prose
-/// keeps the terminal's default foreground.
-const USER_MARKER: &str = "\x1b[1;32m(u)>\x1b[0m "; // bold green
-const ASSISTANT_MARKER: &str = "\x1b[1;36m[a]>\x1b[0m "; // bold cyan
-const PASTE_MARKER: &str = "\x1b[1;35m{p}>\x1b[0m "; // bold magenta
+/// Per-role styling for an emitted entry, so the feed is easy to scan: user,
+/// assistant/agent, and manually-pasted text. Each entry gets a bold ANSI
+/// color-coded opening glyph marker, the prose body tinted in the same color
+/// (non-bold) so the whole entry reads as one role at a glance / mid-scroll,
+/// and a bold closing glyph mirroring the open. The body color is reset by the
+/// closing marker (which ends with a reset) so the blank separator after the
+/// entry — and the manual `═` rule — stay untinted.
+struct EntryStyle {
+    /// Bold color + opening glyph + reset + trailing "> " forward-arrow.
+    open: &'static str,
+    /// Bold color + leading "<" back-arrow + glyph + reset.
+    close: &'static str,
+    /// Non-bold color set after `open`, carried across the terminal's soft-wraps.
+    body: &'static str,
+}
+const USER_STYLE: EntryStyle = EntryStyle {
+    open: "\x1b[1;32m(u)>\x1b[0m ",
+    close: "\x1b[1;32m<(u)\x1b[0m",
+    body: "\x1b[32m",
+}; // green
+const ASSISTANT_STYLE: EntryStyle = EntryStyle {
+    open: "\x1b[1;36m[a]>\x1b[0m ",
+    close: "\x1b[1;36m<[a]\x1b[0m",
+    body: "\x1b[36m",
+}; // cyan
+const PASTE_STYLE: EntryStyle = EntryStyle {
+    open: "\x1b[1;35m{p}>\x1b[0m ",
+    close: "\x1b[1;35m<{p}\x1b[0m",
+    body: "\x1b[35m",
+}; // magenta
 
 /// ANSI reset (SGR 0) closing the color spans above and the separator below.
 const SGR_RESET: &str = "\x1b[0m";
@@ -262,7 +284,7 @@ fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdow
             match parser.feed(byte) {
                 Some(PasteEvent::PasteComplete(s)) => {
                     let _lock = out_mu.lock().unwrap();
-                    emit_entry(PASTE_MARKER, &[&s], block_threshold, ref_height, &proto);
+                    emit_entry(&PASTE_STYLE, &[&s], block_threshold, ref_height, &proto);
                 }
                 Some(PasteEvent::Newline) => {
                     let _lock = out_mu.lock().unwrap();
@@ -445,13 +467,16 @@ impl PasteParser {
     }
 }
 
-/// Emit one conversation/paste entry: the role marker, then each of the entry's
-/// texts rendered (math inline if short, on its own line if tall; prose mirrored
-/// verbatim), then a single blank-line separator. Returns the number of math
-/// segments emitted (render attempts). Emits nothing (and no marker) when the
-/// entry has no renderable content.
+/// Emit one conversation/paste entry: the bold opening role marker, the body
+/// tinted in the role's non-bold color, each of the entry's texts rendered (math
+/// inline if short, on its own line if tall; prose mirrored verbatim), then the
+/// bold closing marker (inline at the end of the content, or on its own line
+/// when the content left the cursor at column 0 — e.g. an image-final entry),
+/// then a single blank-line separator. Returns the number of math segments
+/// emitted (render attempts). Emits nothing (no marker) when the entry has no
+/// renderable content.
 fn emit_entry(
-    marker: &str,
+    style: &EntryStyle,
     texts: &[&str],
     block_threshold: u32,
     ref_height: u32,
@@ -468,16 +493,21 @@ fn emit_entry(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let _ = write!(out, "{marker}");
+    let _ = write!(out, "{}{}", style.open, style.body);
     let mut at_line_start = false; // marker just written
     let mut math_count = 0usize;
     for segs in &scanned {
         math_count += emit_segments(&mut out, segs, &mut at_line_start, block_threshold, ref_height, proto);
     }
 
-    // Close the entry on its own line, then one blank line as the separator.
-    if !at_line_start {
-        let _ = writeln!(out);
+    // Close marker mirrors the open: inline after mid-line content (separated by
+    // a space), or on its own fresh line when the content ended at column 0
+    // (image-final). The close marker ends with a reset, so the body color does
+    // not leak into the blank separator below.
+    if at_line_start {
+        let _ = writeln!(out, "{}", style.close);
+    } else {
+        let _ = writeln!(out, " {}", style.close);
     }
     let _ = writeln!(out);
     math_count
@@ -537,11 +567,11 @@ fn emit_segments(
     math_count
 }
 
-/// Role-marker prefix for a conversation entry, by its `role`.
-fn role_marker(role: &str) -> &'static str {
+/// Per-role entry style for a conversation entry, by its `role`.
+fn role_style(role: &str) -> &'static EntryStyle {
     match role {
-        "user" => USER_MARKER,
-        _ => ASSISTANT_MARKER,
+        "user" => &USER_STYLE,
+        _ => &ASSISTANT_STYLE,
     }
 }
 
@@ -661,7 +691,7 @@ fn catch_up(
     let mut rendered = 0usize;
     for (_, seg) in &recent {
         let _lock = out_mu.lock().unwrap();
-        rendered += emit_entry(role_marker(&seg.role), &[&seg.text], block_threshold, ref_height, proto);
+        rendered += emit_entry(role_style(&seg.role), &[&seg.text], block_threshold, ref_height, proto);
     }
     logging::info(&format!(
         "catch-up: rendered {rendered} expression(s) from {segments} text segment(s) in the last {minutes}m"
@@ -827,10 +857,10 @@ mod tests {
 
     #[test]
     fn role_marker_maps_user_and_assistant() {
-        assert_eq!(role_marker("user"), USER_MARKER);
-        assert_eq!(role_marker("assistant"), ASSISTANT_MARKER);
-        // Unknown roles fall back to the assistant marker.
-        assert_eq!(role_marker("system"), ASSISTANT_MARKER);
+        assert_eq!(role_style("user").open, USER_STYLE.open);
+        assert_eq!(role_style("assistant").open, ASSISTANT_STYLE.open);
+        // Unknown roles fall back to the assistant style.
+        assert_eq!(role_style("system").open, ASSISTANT_STYLE.open);
     }
 
     #[test]

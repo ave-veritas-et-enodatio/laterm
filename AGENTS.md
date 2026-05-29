@@ -24,8 +24,9 @@ laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 
 It spawns no child process. It derives the Claude Code log directory, tails
 every `*.jsonl` conversation log, and for each new entry echoes the full
-conversation text to stdout — prefixed with a color-coded role marker — with all
-LaTeX math expressions rendered as inline images in place. Pass `--catch-up` to first replay recent history before
+conversation text to stdout — bracketed by color-coded role markers with the
+body tinted by role — with all LaTeX math expressions rendered as inline images
+in place. Pass `--catch-up` to first replay recent history before
 tailing begins. You can also paste text directly into its window to render it on the spot.
 
 Crate name: `laterm`. Source root: `src/`.
@@ -102,15 +103,24 @@ reads stdin in raw mode via `termbg::raw_input()` (echo OFF, canonical mode OFF,
 disables it (`ESC[?2004l`) on exit. Pasted text is captured silently between
 the bracketed-paste markers `ESC[200~` … `ESC[201~` and processed through the
 same conversation path — prose mirrored verbatim, delimited math rendered in
-place. Before emitting each entry's content, writes a color-coded role marker —
-`(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> ` (bold cyan,
-`\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
-`\x1b[1;35m`) for pasted text. Role is derived from the conversation entry's
-`role` field; pasted text always uses the paste marker. Markers use the basic
-8-color ANSI SGR palette so they track the user's terminal color scheme; color
-is reset (`\x1b[0m`) before entry content so prose keeps the terminal's default
-foreground. One marker per entry, not per line. Entries with no renderable
-content emit nothing. Each entry is followed by a single blank-line separator.
+place. Each entry is bracketed by a matched pair of bold, color-coded role
+markers. Opening: `(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> `
+(bold cyan, `\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
+`\x1b[1;35m`) for pasted text. Closing (mirrored): `<(u)`, `<[a]`, `<{p}` —
+same bold color. The closing marker is appended inline at the end of the entry's
+last line (separated by a space) when content ends mid-line; when the entry ends
+in a tall/block image the closing marker falls to its own line. The entry's prose
+is rendered in the role's non-bold color (`\x1b[32m` / `\x1b[36m` / `\x1b[35m`)
+— the terminal carries SGR color across its own soft-wraps so the whole entry
+stays tinted without wrapping logic in laterm. Bold markers are the primary role
+signal (and a colorblind backstop); the body tint is a secondary mid-entry
+orientation cue. Math images render neutral. Color is reset before the blank-line
+separator. Markers use the basic 8-color ANSI SGR palette (bold `\x1b[1;3Xm` /
+non-bold `\x1b[3Xm`; 32/36/35 = green/cyan/magenta) so they track the user's
+terminal color scheme. Role is derived from the conversation entry's `role`
+field; pasted text always uses the paste marker. One marker-pair per entry, not
+per line. Entries with no renderable content emit nothing. Each entry is followed
+by a single blank-line separator.
 Pressing Enter/Return writes a visual separator to stdout: a blank line, then a
 terminal-width rule of `═` (U+2550) characters in bold yellow (`\x1b[1;33m`)
 (width from `termbg::term_width()`, default 80 columns), then a newline.
