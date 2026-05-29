@@ -3,7 +3,9 @@
 // prototype lives in prototype/.)
 
 mod convo;
+mod feed;
 mod graphics;
+mod input;
 mod logging;
 mod mathscan;
 mod render;
@@ -11,40 +13,56 @@ mod sixel;
 mod termbg;
 mod watch;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ratex_types::color::Color;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
+use feed::RenderCtx;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_CATCH_UP_MINUTES: i64 = 5;
 
-const USAGE: &str = "\
-usage: laterm [options]
-
-Renders LaTeX math from the current Claude Code conversation log as inline
-terminal images.
-
-options:
-  --log <PATH>          write diagnostics to PATH (default: no logging)
-  --catch-up[=<MINS>]   render math from the last MINS minutes of history
-                        before tailing (bare flag = 5 minutes)
-  --help                show this help and exit
-";
+const USAGE: &str = concat!(
+    "laterm ", env!("CARGO_PKG_VERSION"), "\n",
+    "\n",
+    "usage: laterm [options]\n",
+    "\n",
+    "Renders LaTeX math from the current Claude Code conversation log as inline\n",
+    "terminal images.\n",
+    "\n",
+    "options:\n",
+    "  --cwd <PATH>, -C      derive the watched log dir from PATH instead of the\n",
+    "                        current working directory\n",
+    "  --log <PATH>          write diagnostics to PATH (default: no logging)\n",
+    "  --catch-up[=<MINS>]   render math from the last MINS minutes of history\n",
+    "                        before tailing (bare flag = 5 minutes)\n",
+    "  --version, -V         print version and exit\n",
+    "  --help                show this help and exit\n",
+);
 
 struct Args {
+    cwd: Option<PathBuf>,
     log: Option<PathBuf>,
     catch_up: Option<i64>,
 }
 
-/// Parse argv (excluding the program name). On `--help` returns Ok(None) after
-/// the caller is expected to print usage. On error returns Err with a message.
-fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
+/// The outcome of parsing argv: run with the given args, show help, or show
+/// version. Help and version are distinct terminal actions, both exiting 0.
+enum Invocation {
+    Run(Args),
+    Help,
+    Version,
+}
+
+/// Parse argv (excluding the program name). Returns the [`Invocation`] to
+/// perform, or Err with a message on a malformed argument.
+fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
     let mut args = Args {
+        cwd: None,
         log: None,
         catch_up: None,
     };
@@ -52,7 +70,17 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, St
 
     while let Some(arg) = it.next() {
         if arg == "--help" || arg == "-h" {
-            return Ok(None);
+            return Ok(Invocation::Help);
+        } else if arg == "--version" || arg == "-V" {
+            return Ok(Invocation::Version);
+        } else if arg == "--cwd" || arg == "-C" {
+            let path = it.next().ok_or("--cwd requires a path argument")?;
+            args.cwd = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--cwd=") {
+            if path.is_empty() {
+                return Err("--cwd requires a path argument".to_string());
+            }
+            args.cwd = Some(PathBuf::from(path));
         } else if arg == "--log" {
             let path = it.next().ok_or("--log requires a path argument")?;
             args.log = Some(PathBuf::from(path));
@@ -76,7 +104,7 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Option<Args>, St
         }
     }
 
-    Ok(Some(args))
+    Ok(Invocation::Run(args))
 }
 
 fn main() {
@@ -85,9 +113,13 @@ fn main() {
 
 fn run() -> i32 {
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(Some(a)) => a,
-        Ok(None) => {
+        Ok(Invocation::Run(a)) => a,
+        Ok(Invocation::Help) => {
             print!("{USAGE}");
+            return 0;
+        }
+        Ok(Invocation::Version) => {
+            println!("laterm {}", env!("CARGO_PKG_VERSION"));
             return 0;
         }
         Err(e) => {
@@ -96,17 +128,31 @@ fn run() -> i32 {
         }
     };
 
+    // Honor `-C`/`--cwd` before anything reads the CWD. The existing
+    // `current_dir()`-based derivation then yields the same canonical absolute
+    // path the OS gives Claude Code, so the dir-name mangling matches by
+    // construction (no manual canonicalization). Nothing before dir derivation
+    // depends on CWD (logging is explicit; protocol/theme don't use it).
+    if let Some(p) = &args.cwd
+        && let Err(e) = std::env::set_current_dir(p)
+    {
+        eprintln!("laterm: cannot change directory to {}: {e}", p.display());
+        return 1;
+    }
+
     // No logging by default — opt in with `--log <PATH>`. Avoids multiple
     // instances clobbering one shared default file; enable it for diagnostics.
     if let Some(path) = &args.log {
         logging::init(path, logging::level_from_env());
     }
 
-    // Select graphics protocol first — hard gate.
+    // Select the graphics protocol once — hard gate. The single selected
+    // protocol is shared (Arc) by the watch loop, catch-up, and the reader
+    // thread, so the DA1/sixel probe runs exactly once at startup.
     let proto = match graphics::select() {
-        Some(p) => p,
+        Some(p) => Arc::new(p),
         None => {
-            eprintln!("laterm: terminal supports neither the kitty graphics nor the iTerm2 (imgcat) protocol; run inside a compatible terminal (kitty, ghostty, iTerm2, WezTerm)");
+            eprintln!("laterm: terminal supports none of the kitty graphics, iTerm2 (imgcat), or sixel protocols; run inside a compatible terminal (kitty, ghostty, iTerm2, WezTerm, or a sixel-capable terminal)");
             return 1;
         }
     };
@@ -130,6 +176,22 @@ fn run() -> i32 {
     };
     logging::info(&format!("watching {}", dir.display()));
 
+    // Startup line so the window doesn't look dead — standard terminal color,
+    // no role marker/SGR. main is allowed to write stdout. The watch dir is
+    // tilde-collapsed for legibility.
+    println!(
+        "laterm {} monitoring {}/",
+        env!("CARGO_PKG_VERSION"),
+        display_dir(&dir, dirs_home().as_deref())
+    );
+    // If the dir isn't there yet the watcher waits (it does not exit); surface
+    // that as a not-yet signal, noting paste still works.
+    if !dir.exists() {
+        println!(
+            "  no conversation log for this directory yet — paste to render, or start Claude Code here"
+        );
+    }
+
     // Shutdown flag shared between threads.
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -143,30 +205,27 @@ fn run() -> i32 {
         return 1;
     }
 
-    // Reference X height (one render of "X"); block threshold is 1.5× of it.
-    let ref_height = reference_height();
-    let block_threshold = ref_height * 3 / 2;
+    // Build the render context once: renders the reference "X" to derive the
+    // block threshold (1.5×) and proportional row sizing, and carries the proto.
+    let ctx = Arc::new(RenderCtx::new(proto));
 
     // Stdout lock shared between watch loop and stdin thread.
     let out_mu: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
-    // Spawn stdin reader thread.
+    // Spawn stdin reader thread (paste-only manual input).
     {
         let out_clone = out_mu.clone();
-        let threshold = block_threshold;
-        let ref_h = ref_height;
+        let ctx_read = ctx.clone();
         let shutdown_read = shutdown.clone();
         std::thread::spawn(move || {
-            read_input(&out_clone, threshold, ref_h, &shutdown_read);
+            input::read_input(&out_clone, &ctx_read, &shutdown_read);
         });
     }
-
-    let proto = Arc::new(proto);
 
     // Replay recent history before tailing. The tailer is tail-only (records
     // each file at its current end at startup), so it never re-renders these.
     if let Some(minutes) = args.catch_up {
-        catch_up(&dir, minutes, block_threshold, ref_height, &out_mu, &proto);
+        catch_up(&dir, minutes, &out_mu, &ctx);
     }
 
     // Main watch loop.
@@ -181,368 +240,74 @@ fn run() -> i32 {
             continue;
         }
         // All segments of one entry share a role; mark and separate per entry.
-        let marker = role_marker(&segs[0].role);
+        let style = feed::role_style(&segs[0].role);
         let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
         let _lock = out_mu.lock().unwrap();
-        emit_entry(marker, &texts, block_threshold, ref_height, &proto);
+        feed::emit_entry(style, &texts, &ctx);
     }
 
     0
 }
 
-/// Enable bracketed paste (only `main` writes stdout).
-const PASTE_ON: &[u8] = b"\x1b[?2004h";
-/// Disable bracketed paste.
-const PASTE_OFF: &[u8] = b"\x1b[?2004l";
-/// Terminal bell signalling rejected (typed) input.
-const BEL: &[u8] = b"\x07";
-/// Minimum gap between BEL beeps so a held key / typed sentence doesn't
-/// machine-gun the bell.
-const BEEP_THROTTLE: Duration = Duration::from_millis(250);
-/// Timed-read interval for the raw-input loop; bounds shutdown latency.
-const READ_TIMEOUT: Duration = Duration::from_millis(100);
+/// Render math from conversation entries timestamped within the last `minutes`,
+/// across every *.jsonl file in `dir`, in timestamp order. Runs on the main
+/// thread before the tail watch starts.
+///
+/// Each replayed entry is emitted with a single `emit_entry` call covering all
+/// its text segments — one marker-pair per entry — so caught-up framing is
+/// byte-identical to the live tail (which also emits once per jsonl entry).
+fn catch_up(dir: &Path, minutes: i64, out_mu: &Mutex<()>, ctx: &RenderCtx) {
+    let cutoff = Utc::now() - chrono::Duration::minutes(minutes);
 
-/// Role-marker prefixes written before each emitted entry, so the feed is easy
-/// to scan: user, assistant/agent, and manually-pasted text. Each is ANSI
-/// color-coded (bold) for a stronger visual difference, with the glyphs
-/// distinct per role; the color is reset before the entry's content so prose
-/// keeps the terminal's default foreground.
-const USER_MARKER: &str = "\x1b[1;32m(u)>\x1b[0m "; // bold green
-const ASSISTANT_MARKER: &str = "\x1b[1;36m[a]>\x1b[0m "; // bold cyan
-const PASTE_MARKER: &str = "\x1b[1;35m{p}>\x1b[0m "; // bold magenta
-
-/// ANSI reset (SGR 0) closing the color spans above and the separator below.
-const SGR_RESET: &str = "\x1b[0m";
-/// Manual-separator rule: bold yellow, distinct from the role-marker colors.
-const SEPARATOR_SGR: &str = "\x1b[1;33m";
-/// Separator glyph: U+2550 box-drawings double horizontal (solid double line).
-const SEPARATOR_CHAR: &str = "═";
-
-/// Tracks whether the last thing written to stdout was a manual separator
-/// (Enter in the viewing window). Real content (`emit_entry`) clears it; the
-/// read loop refuses to stack a second separator and beeps instead.
-static LAST_WAS_SEPARATOR: AtomicBool = AtomicBool::new(false);
-
-/// Read manual input PASTE-ONLY: pasted text is captured silently (terminal
-/// echo is off) and rendered through the same path as a conversation entry;
-/// ordinary typing is ignored with a throttled BEL. Escape sequences (arrow
-/// keys, etc.) and control bytes are consumed silently.
-fn read_input(out_mu: &Mutex<()>, block_threshold: u32, ref_height: u32, shutdown: &AtomicBool) {
-    let proto = match graphics::select() {
-        Some(p) => p,
-        None => {
-            logging::warn("read_input: no graphics protocol; manual paste input disabled");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            logging::warn(&format!("catch-up: cannot read {}: {e}", dir.display()));
             return;
         }
     };
-    let mut raw = match termbg::raw_input() {
-        Some(r) => r,
-        None => {
-            logging::warn("read_input: could not enter raw stdin mode; manual paste input disabled");
-            return;
+
+    // One element per source jsonl entry, keeping its segments grouped so the
+    // emit framing matches the live path (one marker-pair per entry).
+    let mut recent: Vec<(DateTime<Utc>, Vec<convo::Segment>)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !watch::is_jsonl(&path) {
+            continue;
         }
-    };
-    logging::info("read_input: raw stdin mode active; paste-only input enabled");
-
-    enable_bracketed_paste();
-
-    let mut parser = PasteParser::new();
-    let mut last_beep: Option<Instant> = None;
-    let mut buf = [0u8; 4096];
-
-    loop {
-        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
-        }
-        let n = match raw.read(&mut buf, READ_TIMEOUT) {
-            Some(n) => n,
-            None => break,
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                logging::warn(&format!("catch-up: cannot read {}: {e}", path.display()));
+                continue;
+            }
         };
-        for &byte in &buf[..n] {
-            match parser.feed(byte) {
-                Some(PasteEvent::PasteComplete(s)) => {
-                    let _lock = out_mu.lock().unwrap();
-                    emit_entry(PASTE_MARKER, &[&s], block_threshold, ref_height, &proto);
-                }
-                Some(PasteEvent::Newline) => {
-                    let _lock = out_mu.lock().unwrap();
-                    // Enter inserts a deliberate separator (rule line). Refuse
-                    // to stack a second one in a row — beep instead.
-                    if LAST_WAS_SEPARATOR.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        throttled_beep(&mut last_beep);
-                    } else {
-                        write_separator();
-                    }
-                }
-                Some(PasteEvent::RejectTyping) => throttled_beep(&mut last_beep),
-                None => {}
+        for line in data.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(parsed) = convo::parse(line)
+                && let Some(ts) = within_window(parsed.timestamp.as_deref(), cutoff)
+            {
+                recent.push((ts, parsed.segments));
             }
         }
     }
 
-    disable_bracketed_paste();
-}
+    recent.sort_by_key(|(ts, _)| *ts);
 
-/// Emit one BEL, at most once per `BEEP_THROTTLE`, to avoid machine-gunning the
-/// bell on a held key.
-fn throttled_beep(last_beep: &mut Option<Instant>) {
-    if last_beep.is_none_or(|t| t.elapsed() >= BEEP_THROTTLE) {
-        beep();
-        *last_beep = Some(Instant::now());
+    let entry_count = recent.len();
+    let mut rendered = 0usize;
+    for (_, segs) in &recent {
+        // All segments of one entry share a role; emit once per entry.
+        let style = feed::role_style(&segs[0].role);
+        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        let _lock = out_mu.lock().unwrap();
+        rendered += feed::emit_entry(style, &texts, ctx);
     }
-}
-
-/// Write a deliberate visual separator: a blank line, a terminal-width rule of
-/// the double-line glyph (color-coded), and a trailing newline. Caller holds
-/// the output mutex.
-fn write_separator() {
-    let rule = SEPARATOR_CHAR.repeat(termbg::term_width());
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\n{SEPARATOR_SGR}{rule}{SGR_RESET}\n");
-    let _ = out.flush();
-}
-
-fn enable_bracketed_paste() {
-    let mut out = std::io::stdout();
-    let _ = out.write_all(PASTE_ON);
-    let _ = out.flush();
-}
-
-fn disable_bracketed_paste() {
-    let mut out = std::io::stdout();
-    let _ = out.write_all(PASTE_OFF);
-    let _ = out.flush();
-}
-
-fn beep() {
-    let mut out = std::io::stdout();
-    let _ = out.write_all(BEL);
-    let _ = out.flush();
-}
-
-/// Event produced by [`PasteParser`] from the raw input stream.
-#[derive(Debug, PartialEq)]
-enum PasteEvent {
-    /// A complete bracketed paste; carries the inner (lossy-UTF8) text.
-    PasteComplete(String),
-    /// The user pressed Enter/Return outside a paste — a request for a manual
-    /// separator.
-    Newline,
-    /// The user typed (rather than pasted) printable input — to be rejected.
-    RejectTyping,
-}
-
-/// Internal parser state.
-#[derive(PartialEq)]
-enum PasteState {
-    /// Outside a paste, matching nothing special.
-    Idle,
-    /// Matched some prefix of the start marker `ESC [ 2 0 0 ~`; `matched` is
-    /// how many bytes of [`PASTE_START`] have matched so far (≥1).
-    StartMarker { matched: usize },
-    /// Inside a paste, buffering bytes and matching the end marker; `end_matched`
-    /// is how many bytes of [`PASTE_END`] have matched at the buffer tail.
-    Capturing { end_matched: usize },
-    /// Consuming an escape sequence (arrow keys, etc.) outside a paste.
-    Escape,
-}
-
-const PASTE_START: &[u8] = b"\x1b[200~";
-const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// A byte-at-a-time state machine recognising bracketed-paste markers and
-/// classifying non-paste input. Pure and unit-testable: no I/O.
-struct PasteParser {
-    state: PasteState,
-    buf: Vec<u8>,
-}
-
-impl PasteParser {
-    fn new() -> Self {
-        PasteParser {
-            state: PasteState::Idle,
-            buf: Vec::new(),
-        }
-    }
-
-    /// Feed one byte; return an event when one is recognised.
-    fn feed(&mut self, byte: u8) -> Option<PasteEvent> {
-        match self.state {
-            PasteState::Idle => self.feed_idle(byte),
-            PasteState::StartMarker { matched } => self.feed_start_marker(matched, byte),
-            PasteState::Capturing { end_matched } => self.feed_capturing(end_matched, byte),
-            PasteState::Escape => {
-                // Consume a CSI/escape sequence: a final byte (>=0x40) ends it.
-                if byte >= 0x40 {
-                    self.state = PasteState::Idle;
-                }
-                None
-            }
-        }
-    }
-
-    fn feed_idle(&mut self, byte: u8) -> Option<PasteEvent> {
-        if byte == 0x1b {
-            self.state = PasteState::StartMarker { matched: 1 };
-            None
-        } else if byte == b'\n' || byte == b'\r' {
-            // Enter/Return: a request for a manual separator.
-            Some(PasteEvent::Newline)
-        } else if byte < 0x20 {
-            // Other control bytes: consume silently.
-            None
-        } else {
-            // Printable ASCII or UTF-8 lead/continuation byte: typed input.
-            Some(PasteEvent::RejectTyping)
-        }
-    }
-
-    fn feed_start_marker(&mut self, matched: usize, byte: u8) -> Option<PasteEvent> {
-        if byte == PASTE_START[matched] {
-            let next = matched + 1;
-            if next == PASTE_START.len() {
-                self.buf.clear();
-                self.state = PasteState::Capturing { end_matched: 0 };
-            } else {
-                self.state = PasteState::StartMarker { matched: next };
-            }
-            None
-        } else {
-            // Not the paste start — it was some other escape sequence
-            // (e.g. ESC [ A for up arrow). Consume it silently.
-            self.state = if byte >= 0x40 {
-                PasteState::Idle
-            } else {
-                PasteState::Escape
-            };
-            None
-        }
-    }
-
-    fn feed_capturing(&mut self, end_matched: usize, byte: u8) -> Option<PasteEvent> {
-        if byte == PASTE_END[end_matched] {
-            let next = end_matched + 1;
-            if next == PASTE_END.len() {
-                let text = String::from_utf8_lossy(&self.buf).into_owned();
-                self.buf.clear();
-                self.state = PasteState::Idle;
-                return Some(PasteEvent::PasteComplete(text));
-            }
-            self.state = PasteState::Capturing { end_matched: next };
-            None
-        } else {
-            // Partial end-marker match broke: those bytes were real content.
-            if end_matched > 0 {
-                self.buf.extend_from_slice(&PASTE_END[..end_matched]);
-                // Re-test this byte against a fresh end-marker scan.
-                self.state = PasteState::Capturing { end_matched: 0 };
-                return self.feed_capturing(0, byte);
-            }
-            self.buf.push(byte);
-            self.state = PasteState::Capturing { end_matched: 0 };
-            None
-        }
-    }
-}
-
-/// Emit one conversation/paste entry: the role marker, then each of the entry's
-/// texts rendered (math inline if short, on its own line if tall; prose mirrored
-/// verbatim), then a single blank-line separator. Returns the number of math
-/// segments emitted (render attempts). Emits nothing (and no marker) when the
-/// entry has no renderable content.
-fn emit_entry(
-    marker: &str,
-    texts: &[&str],
-    block_threshold: u32,
-    ref_height: u32,
-    proto: &graphics::Protocol,
-) -> usize {
-    let scanned: Vec<Vec<mathscan::Segment>> = texts.iter().map(|t| mathscan::scan(t)).collect();
-    if scanned.iter().all(Vec::is_empty) {
-        return 0;
-    }
-
-    // Real content breaks the manual-separator run, so the next Enter draws one.
-    LAST_WAS_SEPARATOR.store(false, std::sync::atomic::Ordering::Relaxed);
-
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-
-    let _ = write!(out, "{marker}");
-    let mut at_line_start = false; // marker just written
-    let mut math_count = 0usize;
-    for segs in &scanned {
-        math_count += emit_segments(&mut out, segs, &mut at_line_start, block_threshold, ref_height, proto);
-    }
-
-    // Close the entry on its own line, then one blank line as the separator.
-    if !at_line_start {
-        let _ = writeln!(out);
-    }
-    let _ = writeln!(out);
-    math_count
-}
-
-/// Walk a flat segment stream, writing text verbatim and rendering math in
-/// place. `at_line_start` carries cursor state across calls (so a leading marker
-/// and successive text blocks share it). Returns the number of math segments
-/// emitted. The caller is responsible for any trailing newline.
-fn emit_segments(
-    out: &mut impl Write,
-    segs: &[mathscan::Segment],
-    at_line_start: &mut bool,
-    block_threshold: u32,
-    ref_height: u32,
-    proto: &graphics::Protocol,
-) -> usize {
-    let mut math_count = 0usize;
-
-    for seg in segs {
-        match seg.kind {
-            mathscan::Kind::Text => {
-                if !seg.text.is_empty() {
-                    let _ = write!(out, "{}", seg.text);
-                    *at_line_start = seg.text.ends_with('\n');
-                }
-            }
-            mathscan::Kind::Math => {
-                math_count += 1;
-                match render::render(&seg.text, seg.display) {
-                    Ok((png, height)) if height >= block_threshold => {
-                        let rows = rows_for(height, ref_height);
-                        if !*at_line_start {
-                            let _ = writeln!(out);
-                        }
-                        let _ = out.write_all(&proto.encode(&png, rows));
-                        let _ = writeln!(out);
-                        *at_line_start = true;
-                    }
-                    Ok((png, height)) => {
-                        let rows = rows_for(height, ref_height);
-                        let _ = out.write_all(&proto.encode(&png, rows));
-                        *at_line_start = false;
-                    }
-                    Err(e) => {
-                        // Pass raw LaTeX through on failure.
-                        logging::warn(&format!("render failed ({e}), passing through raw latex"));
-                        let delim = if seg.display { "$$" } else { "$" };
-                        let _ = write!(out, "{delim}{}{delim}", seg.text);
-                        *at_line_start = false;
-                    }
-                }
-            }
-        }
-    }
-
-    math_count
-}
-
-/// Role-marker prefix for a conversation entry, by its `role`.
-fn role_marker(role: &str) -> &'static str {
-    match role {
-        "user" => USER_MARKER,
-        _ => ASSISTANT_MARKER,
-    }
+    logging::info(&format!(
+        "catch-up: rendered {rendered} expression(s) from {entry_count} entr(ies) in the last {minutes}m"
+    ));
 }
 
 /// Configure the render theme from the detected terminal background.
@@ -583,91 +348,6 @@ fn apply_theme(opaque_bg: bool) {
     }
 }
 
-const DEFAULT_REF_HEIGHT: u32 = 42;
-
-/// Rendered pixel height of a reference capital "X". A math image is scaled to
-/// a row count proportional to its height relative to this, so a capital X
-/// displays as exactly one text row and everything scales with surrounding text.
-fn reference_height() -> u32 {
-    match render::render("X", false) {
-        Ok((_, h)) if h > 0 => h,
-        _ => DEFAULT_REF_HEIGHT,
-    }
-}
-
-/// Visual scale bump so math reads at the surrounding text's full line height
-/// rather than just cap-height: a capital X alone maps to ~1 row, but everything
-/// is nudged up so blocks don't read undersized against the prose around them.
-const ROW_SCALE: f32 = 1.25;
-
-/// Row (cell) count for an image of `height_px`, relative to the reference X
-/// height `ref_px`, scaled by `ROW_SCALE`. Rounds to nearest and clamps to ≥1.
-fn rows_for(height_px: u32, ref_px: u32) -> u32 {
-    ((height_px as f32 / ref_px as f32 * ROW_SCALE).round() as u32).max(1)
-}
-
-
-/// Render math from conversation entries timestamped within the last `minutes`,
-/// across every *.jsonl file in `dir`, in timestamp order. Runs on the main
-/// thread before the tail watch starts.
-fn catch_up(
-    dir: &Path,
-    minutes: i64,
-    block_threshold: u32,
-    ref_height: u32,
-    out_mu: &Mutex<()>,
-    proto: &graphics::Protocol,
-) {
-    let cutoff = Utc::now() - chrono::Duration::minutes(minutes);
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            logging::warn(&format!("catch-up: cannot read {}: {e}", dir.display()));
-            return;
-        }
-    };
-
-    let mut recent: Vec<(DateTime<Utc>, convo::Segment)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let data = match std::fs::read(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                logging::warn(&format!("catch-up: cannot read {}: {e}", path.display()));
-                continue;
-            }
-        };
-        for line in data.split(|&b| b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(parsed) = convo::parse(line) {
-                if let Some(ts) = within_window(parsed.timestamp.as_deref(), cutoff) {
-                    for seg in parsed.segments {
-                        recent.push((ts, seg));
-                    }
-                }
-            }
-        }
-    }
-
-    recent.sort_by_key(|(ts, _)| *ts);
-
-    let segments = recent.len();
-    let mut rendered = 0usize;
-    for (_, seg) in &recent {
-        let _lock = out_mu.lock().unwrap();
-        rendered += emit_entry(role_marker(&seg.role), &[&seg.text], block_threshold, ref_height, proto);
-    }
-    logging::info(&format!(
-        "catch-up: rendered {rendered} expression(s) from {segments} text segment(s) in the last {minutes}m"
-    ));
-}
-
 /// Parse an RFC3339 timestamp and return it (as UTC) if it is at or after
 /// `cutoff`; otherwise None. An absent or unparseable timestamp is excluded.
 fn within_window(timestamp: Option<&str>, cutoff: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -684,6 +364,18 @@ fn project_log_dir() -> Result<PathBuf, String> {
     let home = dirs_home().ok_or_else(|| "home dir: not found".to_string())?;
     let name = cwd.to_string_lossy().replace(['/', '\\', ':'], "-");
     Ok(home.join(".claude").join("projects").join(name))
+}
+
+/// Render `dir` for the startup line: if it is under `home`, collapse that
+/// prefix to `~`; otherwise show it unchanged. Uses the same home source as
+/// [`project_log_dir`] so the collapse is consistent. Pure for unit testing.
+fn display_dir(dir: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = dir.strip_prefix(home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    dir.display().to_string()
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -708,31 +400,82 @@ mod tests {
         a.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Unwrap a successful parse to its `Args`, panicking on any other outcome.
+    fn run_args(argv: Vec<String>) -> Args {
+        match parse_args(argv) {
+            Ok(Invocation::Run(a)) => a,
+            _ => panic!("expected Invocation::Run"),
+        }
+    }
+
     #[test]
     fn no_args_defaults() {
-        let a = parse_args(argv(&[])).unwrap().unwrap();
+        let a = run_args(argv(&[]));
+        assert!(a.cwd.is_none());
         assert!(a.log.is_none());
         assert!(a.catch_up.is_none());
     }
 
     #[test]
-    fn help_returns_none() {
-        assert!(parse_args(argv(&["--help"])).unwrap().is_none());
+    fn cwd_short_long_and_equals_forms() {
+        let short = run_args(argv(&["-C", "/tmp"]));
+        assert_eq!(short.cwd, Some(PathBuf::from("/tmp")));
+        let long = run_args(argv(&["--cwd", "/tmp"]));
+        assert_eq!(long.cwd, Some(PathBuf::from("/tmp")));
+        let eq = run_args(argv(&["--cwd=/tmp"]));
+        assert_eq!(eq.cwd, Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn cwd_missing_value_errors() {
+        assert!(parse_args(argv(&["-C"])).is_err());
+        assert!(parse_args(argv(&["--cwd"])).is_err());
+        assert!(parse_args(argv(&["--cwd="])).is_err());
+    }
+
+    #[test]
+    fn display_dir_collapses_under_home() {
+        let home = PathBuf::from("/Users/benn");
+        let dir = PathBuf::from("/Users/benn/.claude/projects/-Users-benn-projects-laterm");
+        assert_eq!(
+            display_dir(&dir, Some(&home)),
+            "~/.claude/projects/-Users-benn-projects-laterm"
+        );
+    }
+
+    #[test]
+    fn display_dir_passes_through_outside_home() {
+        let home = PathBuf::from("/Users/benn");
+        let dir = PathBuf::from("/var/data/-x");
+        assert_eq!(display_dir(&dir, Some(&home)), "/var/data/-x");
+        assert_eq!(display_dir(&dir, None), "/var/data/-x");
+    }
+
+    #[test]
+    fn help_returns_help_variant() {
+        assert!(matches!(parse_args(argv(&["--help"])), Ok(Invocation::Help)));
+        assert!(matches!(parse_args(argv(&["-h"])), Ok(Invocation::Help)));
+    }
+
+    #[test]
+    fn version_returns_version_variant() {
+        assert!(matches!(parse_args(argv(&["--version"])), Ok(Invocation::Version)));
+        assert!(matches!(parse_args(argv(&["-V"])), Ok(Invocation::Version)));
     }
 
     #[test]
     fn log_space_and_equals_forms() {
-        let a = parse_args(argv(&["--log", "/tmp/x.log"])).unwrap().unwrap();
+        let a = run_args(argv(&["--log", "/tmp/x.log"]));
         assert_eq!(a.log, Some(PathBuf::from("/tmp/x.log")));
-        let b = parse_args(argv(&["--log=/tmp/y.log"])).unwrap().unwrap();
+        let b = run_args(argv(&["--log=/tmp/y.log"]));
         assert_eq!(b.log, Some(PathBuf::from("/tmp/y.log")));
     }
 
     #[test]
     fn catch_up_bare_and_explicit() {
-        let bare = parse_args(argv(&["--catch-up"])).unwrap().unwrap();
+        let bare = run_args(argv(&["--catch-up"]));
         assert_eq!(bare.catch_up, Some(DEFAULT_CATCH_UP_MINUTES));
-        let explicit = parse_args(argv(&["--catch-up=20"])).unwrap().unwrap();
+        let explicit = run_args(argv(&["--catch-up=20"]));
         assert_eq!(explicit.catch_up, Some(20));
     }
 
@@ -743,122 +486,6 @@ mod tests {
         assert!(parse_args(argv(&["--log="])).is_err());
         assert!(parse_args(argv(&["--catch-up=abc"])).is_err());
         assert!(parse_args(argv(&["--catch-up=-3"])).is_err());
-    }
-
-    #[test]
-    fn rows_for_rounds_and_clamps() {
-        // Scaled by ROW_SCALE (1.25), then rounded to nearest.
-        assert_eq!(rows_for(42, 42), 1); // 1.0 * 1.25 = 1.25 -> 1
-        assert_eq!(rows_for(126, 42), 4); // 3.0 * 1.25 = 3.75 -> 4
-        assert_eq!(rows_for(59, 42), 2); // 1.40 * 1.25 = 1.76 -> 2
-        assert_eq!(rows_for(67, 42), 2); // 1.60 * 1.25 = 1.99 -> 2
-        // Clamps to at least 1 even for tiny images.
-        assert_eq!(rows_for(0, 42), 1);
-        assert_eq!(rows_for(5, 42), 1); // 0.12 * 1.25 = 0.15 -> 0 -> clamp 1
-    }
-
-    fn feed_all(p: &mut PasteParser, bytes: &[u8]) -> Vec<PasteEvent> {
-        bytes.iter().filter_map(|&b| p.feed(b)).collect()
-    }
-
-    #[test]
-    fn clean_paste_yields_one_complete() {
-        let mut p = PasteParser::new();
-        let input = b"\x1b[200~hello $x$ world\x1b[201~";
-        let events = feed_all(&mut p, input);
-        assert_eq!(
-            events,
-            vec![PasteEvent::PasteComplete("hello $x$ world".to_string())]
-        );
-    }
-
-    #[test]
-    fn multiline_paste_preserves_newlines() {
-        let mut p = PasteParser::new();
-        let input = b"\x1b[200~line1\nline2\n$$y$$\x1b[201~";
-        let events = feed_all(&mut p, input);
-        assert_eq!(
-            events,
-            vec![PasteEvent::PasteComplete("line1\nline2\n$$y$$".to_string())]
-        );
-    }
-
-    #[test]
-    fn markers_split_across_feeds_still_parse() {
-        let mut p = PasteParser::new();
-        // Start marker split byte-by-byte, content, end marker split.
-        let mut events = Vec::new();
-        for chunk in [
-            &b"\x1b[2"[..],
-            &b"00~"[..],
-            &b"ab"[..],
-            &b"\x1b[20"[..],
-            &b"1~"[..],
-        ] {
-            events.extend(feed_all(&mut p, chunk));
-        }
-        assert_eq!(events, vec![PasteEvent::PasteComplete("ab".to_string())]);
-    }
-
-    #[test]
-    fn typed_printable_rejected() {
-        let mut p = PasteParser::new();
-        assert_eq!(p.feed(b'a'), Some(PasteEvent::RejectTyping));
-        assert_eq!(p.feed(b' '), Some(PasteEvent::RejectTyping));
-        // UTF-8 lead byte counts as typed input too.
-        assert_eq!(p.feed(0xc3), Some(PasteEvent::RejectTyping));
-    }
-
-    #[test]
-    fn arrow_key_escape_is_silent() {
-        let mut p = PasteParser::new();
-        // ESC [ A — up arrow — outside paste, no RejectTyping.
-        assert_eq!(feed_all(&mut p, b"\x1b[A"), vec![]);
-        // Parser is back to idle and rejects subsequent typing.
-        assert_eq!(p.feed(b'z'), Some(PasteEvent::RejectTyping));
-    }
-
-    #[test]
-    fn control_bytes_silent() {
-        let mut p = PasteParser::new();
-        // Tab and Ctrl-C produce no event (CR/LF are Newline, tested separately).
-        assert_eq!(feed_all(&mut p, b"\t\x03"), vec![]);
-    }
-
-    #[test]
-    fn role_marker_maps_user_and_assistant() {
-        assert_eq!(role_marker("user"), USER_MARKER);
-        assert_eq!(role_marker("assistant"), ASSISTANT_MARKER);
-        // Unknown roles fall back to the assistant marker.
-        assert_eq!(role_marker("system"), ASSISTANT_MARKER);
-    }
-
-    #[test]
-    fn enter_yields_newline_outside_paste() {
-        let mut p = PasteParser::new();
-        assert_eq!(p.feed(b'\n'), Some(PasteEvent::Newline));
-        assert_eq!(p.feed(b'\r'), Some(PasteEvent::Newline));
-    }
-
-    #[test]
-    fn newlines_inside_paste_are_content_not_separators() {
-        let mut p = PasteParser::new();
-        assert_eq!(
-            feed_all(&mut p, b"\x1b[200~a\nb\rc\x1b[201~"),
-            vec![PasteEvent::PasteComplete("a\nb\rc".to_string())]
-        );
-    }
-
-    #[test]
-    fn end_marker_false_start_kept_as_content() {
-        let mut p = PasteParser::new();
-        // Content contains a lone ESC that does not begin the end marker.
-        let input = b"\x1b[200~a\x1bb\x1b[201~";
-        let events = feed_all(&mut p, input);
-        assert_eq!(
-            events,
-            vec![PasteEvent::PasteComplete("a\x1bb".to_string())]
-        );
     }
 
     #[test]

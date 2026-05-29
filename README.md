@@ -34,7 +34,7 @@ is no Unicode text fallback.
 
 ```bash
 # pick the binary for your platform
-./dist/laterm-laterm-aarch64-apple-darwin
+./dist/laterm-aarch64-apple-darwin
 ./dist/laterm-x86_64-pc-windows-gnu.exe
 ./dist/laterm-x86_64-unknown-linux-gnu
 ```
@@ -46,11 +46,18 @@ on Mac: `make dequarantine` first
 ```bash
 git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
-make release
+make dist       # cross-build the per-platform binaries into dist/
+make install    # copy the right one to ~/bin/laterm
 ```
 
-The binary is written to `target/release/laterm`. Copy or symlink it onto your
-`PATH`.
+`make install` selects the binary for your OS from `dist/`, copies it to
+`~/bin/laterm` (override with `INSTALL_DIR=...`), and on macOS removes the
+quarantine attribute. It replaces any existing copy by removing it first (a
+fresh inode), which avoids a macOS code-signing cache quirk that otherwise
+`Killed:9`s an overwritten binary. Run `make dist` first so `dist/` is current.
+
+Alternatively, `make release` writes a single `target/release/laterm`; copy or
+symlink that onto your `PATH` yourself.
 
 Open a second terminal window (kitty, ghostty, iTerm2, WezTerm, Windows Terminal,
 or any Sixel-capable terminal), `cd` to the
@@ -70,27 +77,38 @@ not accepted — ordinary keystrokes produce a beep. Pressing Enter/Return inser
 rule of `═` (U+2550) characters in bold yellow, then a newline — to manually
 divide topics in the rendered feed; pressing Enter again without any rendered
 content in between just beeps (rules do not stack). Each rendered entry is
-prefixed with a color-coded role marker: `(u)>` (bold green) for your prompts,
-`[a]>` (bold cyan) for assistant replies, and `{p}>` (bold magenta) for pasted
-text, making the feed easy to scan at a glance.
+bracketed by a matched pair of color-coded role markers — opening `(u)>` / closing
+`<(u)` (bold green) for your prompts, `[a]>` / `<[a]` (bold cyan) for assistant
+replies, `{p}>` / `<{p}` (bold magenta) for pasted text — and the body text is
+tinted in the role's color (green / cyan / magenta) for at-a-glance scanning.
+Both markers and body tint are readable in light and dark themes.
 
 ## Usage / Options
 
 ```
-laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
 ```
 
 | Flag | Description |
 |---|---|
+| `--cwd <PATH>`, `-C` | Derive the watched log directory from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
 | `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |
 | `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
+| `--version`, `-V` | Print version and exit. |
 | `--help`, `-h` | Print usage and exit. |
+
+At startup laterm prints one plain-color line — `laterm <version> monitoring
+<dir>/` — naming the conversation-log directory it watches (tilde-collapsed when
+under your home directory), so the window does not look dead. If that directory
+does not exist yet (Claude Code has not been started there), a second line warns
+that there is no conversation log yet; laterm keeps running and waits for it, and
+you can paste text to render in the meantime.
 
 ## How It Works
 
 1. From the working directory, LaTerm derives the Claude Code log directory:
    `~/.claude/projects/<cwd with '/' replaced by '-'>`.
-2. It polls that directory (~500 ms) and tails every `*.jsonl` conversation log.
+2. It polls that directory (~250 ms) and tails every `*.jsonl` conversation log.
    Tail-only: content present at startup is not replayed. Pass `--catch-up` to
    first replay math from recent history before the tail begins.
 3. For each new entry it extracts the text from user/assistant messages and
@@ -100,9 +118,10 @@ laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
    preference order). If rendering fails, the raw LaTeX is passed through as text.
 
 Output is a **full echo**: the conversation text is mirrored verbatim, with each
-math expression rendered as an image in place. Each entry is prefixed with a
-color-coded role marker — `(u)>` for user entries, `[a]>` for assistant entries,
-`{p}>` for pasted text — and followed by a blank-line separator. A small expression (single symbol,
+math expression rendered as an image in place. Each entry is bracketed by a
+matched open/close role marker pair — `(u)>` / `<(u)` for user entries, `[a]>` /
+`<[a]` for assistant entries, `{p}>` / `<{p}` for pasted text — with the body
+text tinted in the role's color, and followed by a blank-line separator. A small expression (single symbol,
 simple sub/superscript) renders inline in the text flow; a tall one (fraction,
 integral, summation) renders on its own line. Image size scales proportionally to
 the terminal's text, so math sits naturally alongside the prose. At startup
@@ -150,7 +169,7 @@ panicking, so bad input degrades gracefully.
   ghostty), iTerm2 imgcat (iTerm2, WezTerm), or Sixel (Windows Terminal v1.22+,
   xterm, foot, mlterm, WezTerm, and others). Selection order: kitty → imgcat →
   Sixel. No Unicode fallback; a terminal supporting none is rejected at startup.
-- **Polling latency.** The watcher polls at ~500 ms, so a rendered expression
+- **Polling latency.** The watcher polls at ~250 ms, so a rendered expression
   may appear up to that long after it is written.
 - **Background detection is best-effort.** Glyph contrast relies on an OSC 11
   query; terminals that do not answer (within 200 ms) get a black-on-white
@@ -168,6 +187,7 @@ make build    # debug build
 make release  # optimized build → target/release/laterm
 make test     # run unit tests
 make dist     # cross-build all three release targets into dist/
+make install  # copy the dist binary for this OS to ~/bin (INSTALL_DIR to override)
 ```
 
 Plain `cargo build --release` and `cargo test` work too. The root Makefile is
@@ -193,4 +213,4 @@ a thin wrapper over cargo; the Go prototype keeps its own Makefile under
 | [`chrono`](https://github.com/chronotope/chrono) v0.4 | Chrono Contributors | MIT / Apache-2.0 | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | [`ctrlc`](https://github.com/Detegr/rust-ctrlc) v3 | Antti Ker&#228;nen | MIT / Apache-2.0 | Cross-platform SIGINT/SIGTERM handler |
 | [`libc`](https://github.com/rust-lang/libc) v0.2 | The Rust Project Developers | MIT / Apache-2.0 | Unix-only: termios raw mode and `select(2)` for OSC 11 background query |
-| [`windows-sys`](https://github.com/microsoft/windows-rs) v0.59 | Microsoft | MIT / Apache-2.0 | Windows-only: Console API for OSC 11 background query |
+| [`windows-sys`](https://github.com/microsoft/windows-rs) v0.59 | Microsoft | MIT / Apache-2.0 | Windows-only: Console API for OSC 11 / DA1 / cell-size queries and terminal width; `FILE_SHARE_READ` for the log-file share mode |

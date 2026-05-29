@@ -81,7 +81,8 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
     {
         // FILE_SHARE_READ: other processes may open for reading, not writing.
         use std::os::windows::fs::OpenOptionsExt;
-        opts.share_mode(0x0000_0001);
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        opts.share_mode(FILE_SHARE_READ);
     }
 
     let file = opts.open(path)?;
@@ -92,6 +93,8 @@ fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
         // Advisory exclusive lock, non-blocking: a second laterm fails fast.
         // Readers don't flock, so tailing the log is unaffected. Released when
         // the file (and the process) closes.
+        // SAFETY: `file` owns a live, open fd for the duration of this call;
+        // flock only operates on that descriptor and we check its return value.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,

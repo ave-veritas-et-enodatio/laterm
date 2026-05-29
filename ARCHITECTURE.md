@@ -59,14 +59,27 @@ blocking defect.
    line (newline before + image + newline). A shorter expression stays **inline**
    in the text flow. Both layouts call the same `encode(png, rows)`. Each emitted
    entry (one jsonl conversation entry, or one paste) is prefixed with a
-   color-coded role marker emitted once per entry — not per line: `(u)> ` (bold
-   green) for user entries, `[a]> ` (bold cyan) for assistant/agent entries,
-   `{p}> ` (bold magenta) for manually pasted text. Markers use ANSI SGR escapes
-   from the basic 8-color palette (e.g. `\x1b[1;32m…\x1b[0m`) so they track the
-   user's terminal color scheme; color is reset before the entry's content so
-   prose keeps the terminal's default foreground. Entries with no renderable
-   content emit nothing (no marker). Each entry is followed by a single blank-line
-   separator. Only the `main` module writes to stdout (role markers included).
+   matched pair of bold, color-coded role markers — one per entry, not per line:
+   opening `(u)> ` / closing `<(u)` (bold green) for user entries, `[a]> ` /
+   `<[a]` (bold cyan) for assistant/agent entries, `{p}> ` / `<{p}` (bold
+   magenta) for manually pasted text. The closing marker is appended inline at
+   the end of the entry's last line (separated by a space) when content ends
+   mid-line; when the entry ends in a tall/block image the closing marker falls to
+   its own line. The entry's prose is rendered in the role's non-bold color (user:
+   green `\x1b[32m`; assistant: cyan `\x1b[36m`; paste: magenta `\x1b[35m`) —
+   the terminal carries the SGR color across its own soft-wraps, so the whole
+   entry stays tinted at any scroll position with no wrapping logic in laterm.
+   Bold markers are the primary role signal (and a colorblind backstop); the body
+   tint is a secondary mid-entry orientation cue. Math images are not tinted —
+   they render neutral per the contrast logic. The color is reset before the
+   blank-line separator, so separators stay untinted. Markers use ANSI SGR escapes
+   from the basic 8-color palette so they track the user's terminal color scheme
+   rather than imposing fixed hues. Entries with no renderable content emit
+   nothing (no marker). Each entry is followed by a single blank-line separator.
+   stdout is written only by `main` and the output-feed modules (`main` emits
+   the plain-color startup line and the optional missing-dir warning; `feed`
+   emits the markers + tinted prose + images; `input` emits paste renders, the
+   separator rule, and BEL); no other module writes stdout.
 
 **Resilience**
 
@@ -121,81 +134,121 @@ blocking defect.
 ```
 src/
   main.rs          -- wiring: derive log dir, protocol select, watch loop, signal handling
+  feed.rs          -- output/render orchestration: markers, tinted prose, math images, RenderCtx
+  input.rs         -- manual paste-only stdin: PasteParser, separator rule, BEL
   watch.rs         -- polling tailer: *.jsonl, tail-only, partial-line buffering
   convo.rs         -- jsonl parser: extracts text from user/assistant entries
   mathscan.rs      -- LaTeX delimiter scanner: flat Vec<Segment>, document order
   render.rs        -- RaTeX pipeline: parse → layout → display list → PNG, theme
-  graphics.rs      -- protocol selection: kitty (preferred), imgcat, or sixel
-  kitty.rs         -- kitty graphics protocol encoder; supported() detection
-  imgcat.rs        -- iTerm2 OSC 1337 encoder; supported() detection
+  graphics.rs      -- protocol selection + kitty/imgcat encoders (private fns)
   sixel.rs         -- Sixel encoder; supported() via DA1 query (parse_da1)
   termbg.rs        -- OSC 11 background query + shared query_terminal() helper
   logging.rs       -- log configuration, file + stderr output, level management
 ```
 
+There are no `kitty.rs` / `imgcat.rs` files: the kitty graphics-protocol encoder
+and the iTerm2 imgcat (OSC 1337) encoder are private functions inside
+`graphics.rs`. `sixel` is the only encoder with its own module (it needs
+`termbg` for the DA1/cell-size probes). `feed` and `input` are the output-feed
+modules — together with `main` they are the only modules that write to stdout.
+
 ### Module Responsibilities and Constraints
 
 **`main`**
-- Responsibility: Parse CLI flags (`--log`, `--catch-up`, `--help`).
-  Initialize logging. Derive the Claude Code log directory for the current
-  working directory. Select a graphics protocol via `graphics::select` and exit
-  immediately (with a clear error) if none of kitty, imgcat, or Sixel is
-  supported.
+- Responsibility (wiring only): Parse CLI flags (`-C`/`--cwd`, `--log`,
+  `--catch-up`, `--help`/`--version`). If `-C`/`--cwd <PATH>` is given,
+  `set_current_dir(PATH)` **before** deriving the log dir, so the existing
+  `current_dir()`-based derivation produces the same canonical absolute path the
+  OS gives Claude Code and the dir-name mangling matches by construction (no
+  manual canonicalization). Initialize logging. Derive the Claude Code log
+  directory for the (possibly changed) working directory. Print the startup line
+  (see below). Select a graphics protocol via
+  `graphics::select` **once**, exit immediately (clear error) if none of kitty,
+  imgcat, or Sixel is supported, and wrap it in an `Arc` shared by catch-up, the
+  watch loop, and the reader thread (so the sixel DA1 probe runs exactly once).
   Detect the terminal background via `termbg::query` and configure the renderer
-  theme. Render a reference capital "X" once (`render::render("X", false)`,
-  default 42 px if it fails) to obtain the reference X height; this single
-  value drives both the block-threshold (1.5× reference) and the proportional
-  row count for every image. If `--catch-up` was given, replay recent history
-  before starting the tailer. Start the watch loop. For each line, call
-  `convo::extract`, then `mathscan::scan`; walk the returned flat segment list
-  in order — text segments echoed verbatim, each math segment rendered via
-  `render::render`, then `rows = max(1, round(height_px / reference_X_height_px × 1.25))`
-  computed, and the image emitted via `proto.encode(png, rows)`. Height ≥
-  1.5× reference → block layout (newline + image + newline); otherwise inline
-  (in flow). Handle SIGINT/SIGTERM to stop the watch loop cleanly.
-- Manual input: also reads stdin in raw mode via `termbg::raw_input()` (echo
-  OFF, canonical mode OFF). Enables bracketed paste (`ESC[?2004h`) on entry and
-  disables it (`ESC[?2004l`) on exit, restoring the prior terminal mode via RAII.
-  Pasted text is captured silently between the bracketed-paste markers
-  `ESC[200~` … `ESC[201~` and processed through the same conversation path —
-  prose mirrored verbatim, delimited math rendered in place (inline vs block by
-  height, proportional `rows` sizing). Multi-line pastes are handled as one
-  entry. Before emitting each entry's content, `main` writes a color-coded role
-  marker: `(u)> ` (bold green, `\x1b[1;32m`) for user entries, `[a]> ` (bold
-  cyan, `\x1b[1;36m`) for assistant/agent entries, `{p}> ` (bold magenta,
-  `\x1b[1;35m`) for pasted text. The role is derived from the conversation
-  entry's `role` field (`user` → user marker; anything else → assistant marker);
-  pasted text always uses the paste marker. Markers use ANSI SGR escapes from
-  the basic 8-color palette, chosen so they track the user's terminal color
-  scheme rather than imposing fixed truecolor values; the color is reset
-  (`\x1b[0m`) before the entry's content so prose keeps the terminal's default
-  foreground. One marker per entry — not per line. Entries with no renderable
-  content emit nothing (no marker). Each entry is followed by a single blank-line
-  separator. Pressing Enter/Return writes a visual separator to stdout: a blank
-  line, then a terminal-width rule of `═` (U+2550, box-drawings double-horizontal)
-  characters in bold yellow (`\x1b[1;33m`), then a newline (width from
-  `termbg::term_width()`, falling back to 80 columns). Debounce: if the last
-  output was already a manual separator, Enter beeps instead of stacking a second
-  rule; any subsequently rendered content (a conversation entry or a paste)
-  re-arms the separator. Typed printable keystrokes produce a throttled terminal
-  BEL (`\x07`, at most ~once per 250 ms); escape sequences and control bytes are
-  consumed silently. Typed input is never rendered. Ctrl-C still fires SIGINT
-  (`ISIG` preserved). A shared output mutex keeps conversation and manual renders
-  from interleaving. Only `main` writes to stdout (role markers, bracketed-paste
-  toggles, separator rules, and BEL included).
+  theme (`apply_theme`). Build a `feed::RenderCtx` once — its constructor renders
+  the reference capital "X" (default 42 px if it fails) to derive the
+  block-threshold (1.5× reference) and the proportional row sizing, and carries
+  the protocol. Spawn the stdin reader thread (`input::read_input`, given the
+  `RenderCtx` and the shared output mutex). If `--catch-up` was given, replay
+  recent history (grouped by source entry) via `feed::emit_entry` before starting
+  the tailer. Start the watch loop: for each line, `convo::extract` then
+  `feed::emit_entry` under the output mutex. Handle SIGINT/SIGTERM to stop the
+  watch loop cleanly.
 - Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
   absolute working directory path is replaced by `-`.
-- Must NOT contain: rendering logic, parsing logic, or sanitization logic.
-  This is wiring only. Only this module writes to stdout.
+- Startup line: after the protocol is selected and the log dir is derived (and
+  after any `-C` chdir), `main` writes ONE plain-color line to stdout (no SGR
+  role color, no role marker): `laterm <version> monitoring <dir>/`, where
+  `<version>` is `CARGO_PKG_VERSION` and `<dir>` is the derived watch dir
+  tilde-collapsed (the home prefix — HOME on unix / USERPROFILE on windows, the
+  same source `project_log_dir` uses — replaced by `~`; otherwise the absolute
+  path), with a trailing `/`. The collapse is a pure helper (`display_dir`).
+- Missing-dir warning: if the derived dir does not exist at startup, `main`
+  writes a second plain-color stdout line right under the startup line phrased
+  as not-yet (paste still works), e.g. `  no conversation log for this directory
+  yet — paste to render, or start Claude Code here`. The watcher still waits for
+  the dir; laterm does not exit.
+- Must NOT contain: rendering, parsing, marker, or protocol logic. This is
+  wiring only.
+
+**`feed`**
+- Responsibility: Turn conversation/paste text into the rendered stdout feed.
+  Owns the `EntryStyle` role markers (`USER_STYLE`/`ASSISTANT_STYLE`/
+  `PASTE_STYLE`), `role_style`, the reference-X sizing (`RenderCtx`,
+  `ROW_SCALE`, `rows_for`), and the `emit_entry`/`emit_segments` pipeline.
+  `emit_entry(style, texts, &RenderCtx)` walks each text's flat segment list:
+  text echoed verbatim (newlines preserved), each math segment rendered via
+  `render::render`, then `rows = max(1, round(height_px / reference_X_height_px ×
+  1.25))` and `ctx.proto.encode(png, rows)`. Height ≥ 1.5× reference → block
+  (newline + image + newline); otherwise inline. Each entry is bracketed by a
+  matched bold, color-coded role-marker pair: opening `(u)> ` (bold green,
+  `\x1b[1;32m`), `[a]> ` (bold cyan, `\x1b[1;36m`), `{p}> ` (bold magenta,
+  `\x1b[1;35m`); closing (mirrored) `<(u)`/`<[a]`/`<{p}` in the same bold color.
+  The closing marker is appended inline at the end of the last line (separated by
+  a space) when content ends mid-line, or on its own line when the entry ends in
+  a block image. Prose is rendered in the role's non-bold color
+  (`\x1b[32m`/`\x1b[36m`/`\x1b[35m`), carried across the terminal's soft-wraps;
+  math images render neutral; the close marker resets color before the blank-line
+  separator. One marker-pair per entry — not per line. Entries with no renderable
+  content emit nothing. `emit_entry` clears the manual-separator armed state;
+  `arm_separator()` lets `input` re-arm/test it without a `feed → input` cycle.
+  Writes stdout under the caller-held output mutex (no inner stdout lock — the
+  mutex is the cross-thread serializer).
+- Imports: `mathscan`, `render`, `graphics`, `logging`.
+- Must NOT import: `input`, `watch`, `convo`, `termbg`.
+
+**`input`**
+- Responsibility: Manual paste-only stdin handling for the viewing window.
+  Reads stdin in raw mode via `termbg::raw_input()` (echo OFF, canonical mode
+  OFF, `ISIG` preserved). Enables bracketed paste (`ESC[?2004h`) at startup and
+  disables it (`ESC[?2004l`) on exit. A byte-at-a-time `PasteParser` captures
+  text between the bracketed-paste markers `ESC[200~` … `ESC[201~` and renders it
+  via `feed::emit_entry` (`PASTE_STYLE`); multi-line pastes are one entry.
+  Pressing Enter/Return writes a manual separator: a blank line, a terminal-width
+  rule of `═` (U+2550, box-drawings double-horizontal) in bold yellow
+  (`\x1b[1;33m`, width via `termbg::term_width()`, default 80), then a newline.
+  Debounce via `feed::arm_separator()`: if the last output was already a
+  separator, Enter beeps instead of stacking; any rendered content re-arms it.
+  Typed printable keystrokes produce a throttled terminal BEL (`\x07`, ~once per
+  250 ms); escape sequences and control bytes are consumed silently. Typed input
+  is never rendered; Ctrl-C still fires SIGINT (`ISIG` preserved). All stdout
+  writes (paste render, separator rule, BEL, bracketed-paste toggles) go under
+  the shared output mutex so they don't interleave with the watch loop.
+- Imports: `feed`, `termbg`, `logging`. `input → feed` (no cycle).
 
 **`watch`**
-- Responsibility: Poll `dir` at `interval` for `*.jsonl` files. Tail-only
-  semantics: existing files are recorded at their current size at startup;
-  files appearing later start at offset 0. Per tick: read newly-appended bytes,
-  split on `\n`, emit complete lines on the channel. Buffer partial lines.
-  Handle truncation/rotation by resetting to offset 0. Wait gracefully if `dir`
-  does not yet exist. Close the channel when the context/cancellation token is
-  signalled.
+- Responsibility: Poll `dir` at `interval` for `*.jsonl` files (`is_jsonl(path)`
+  helper, also reused by catch-up). Tail-only semantics: existing files are
+  recorded at their current size at startup; files appearing later start at
+  offset 0. Per tick: read newly-appended bytes and split on `\n` with a
+  cursor/index advance (not a per-line buffer rebuild — the old approach was
+  O(N²) in buffer size), emitting complete lines as `Line { data: Vec<u8> }`
+  (bytes only; the unused per-line path field was removed). Only the trailing
+  partial line is copied once into the pending buffer. Handle truncation/rotation
+  by resetting to offset 0. Wait gracefully if `dir` does not yet exist. Close
+  the channel when the cancellation flag is signalled.
 - No dependencies on other laterm modules.
 
 **`convo`**
@@ -233,34 +286,29 @@ src/
   transparent). Returns the PNG bytes and the rendered image height in pixels
   (used by the caller to choose inline vs block layout).
 - Imports: `ratex-parser`, `ratex-layout`, `ratex-render`, `ratex-types`.
-- Must NOT import: `watch`, `convo`, `mathscan`, `graphics`, `kitty`, `imgcat`.
+- Must NOT import: `watch`, `convo`, `mathscan`, `graphics`, `feed`, `input`.
 
 **`graphics`**
 - Responsibility: Select the terminal image protocol. Tries kitty first
   (env-based), then imgcat (env-based), then Sixel (DA1 tty round-trip). Returns
-  a protocol handle, or `None` when none is supported.
-- Imports: `kitty`, `imgcat`, `sixel`.
-- Must NOT import: `render`, `mathscan`, `convo`, `watch`.
+  a `Protocol` handle (carrying an `encode_fn`), or `None` when none is
+  supported. The kitty and imgcat encoders are **private functions inside this
+  module** (`kitty_supported`/`kitty_encode`, `imgcat_supported`/`imgcat_encode`),
+  not separate files:
+  - *kitty* — `kitty_supported` checks `KITTY_WINDOW_ID`, `TERM` containing
+    `kitty`/`ghostty`, or `TERM_PROGRAM == "ghostty"`. `kitty_encode(png, rows)`
+    transmits the PNG (`f=100`) in ≤4096-byte base64 chunks via `ESC _ G … ESC \`
+    APC escapes, displayed at the cursor (`a=T,f=100,r=<rows>` on the first
+    chunk) — the caller always supplies the proportional row count.
+  - *imgcat* — `imgcat_supported` checks `TERM_PROGRAM == "iTerm.app"`,
+    `LC_TERMINAL == "iTerm2"`, or `TERM_PROGRAM == "WezTerm"`.
+    `imgcat_encode(png, rows)` emits
+    `ESC ] 1337 ; File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64> BEL`.
+- Uses `base64` crate; imports `sixel`.
+- Must NOT import: `render`, `mathscan`, `convo`, `watch`, `feed`, `input`.
 
-**`kitty`**
-- Responsibility: Detect kitty graphics support and encode PNG bytes as the
-  kitty graphics protocol. PNG (`f=100`) transmitted in ≤4096-byte base64
-  chunks via `ESC _ G ... ESC \` APC escapes, displayed at the cursor (`a=T`).
-  `supported()` checks `KITTY_WINDOW_ID`, `TERM` containing `kitty`/`ghostty`,
-  or `TERM_PROGRAM == "ghostty"`. `encode(png: &[u8], rows: u32)`: emits
-  `a=T,f=100,r=<rows>` — the caller always supplies the proportional row count.
-- Uses `base64` crate.
-- No dependencies on other laterm modules.
-
-**`imgcat`**
-- Responsibility: Detect iTerm2/WezTerm imgcat support and encode PNG bytes as
-  the iTerm2 OSC 1337 inline-image escape sequence.
-  `supported()` checks `TERM_PROGRAM == "iTerm.app"`, `LC_TERMINAL == "iTerm2"`,
-  or `TERM_PROGRAM == "WezTerm"`. `encode(png: &[u8], rows: u32)`: emits
-  `ESC ] 1337 ; File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64> BEL`,
-  where `rows` is in terminal cells (the proportional row count from `main`).
-- Uses `base64` crate.
-- No dependencies on other laterm modules.
+**`imgcat` and `kitty`** — not standalone modules; see the private encoders in
+`graphics` above.
 
 **`sixel`**
 - Responsibility: Detect Sixel support and encode PNG bytes as a Sixel escape
@@ -268,18 +316,25 @@ src/
   `query_terminal()` helper and returns true when attribute `4` appears in the
   `\x1b[?<attrs>c` reply (`parse_da1`). The helper handles raw-tty/Console API
   setup on both unix and Windows, so DA1 works on Windows Terminal.
-  `encode(png: &[u8], rows: u32)` decodes the PNG to RGBA8 using the `png`
-  crate, then emits a standard Sixel stream: DCS introducer + 1:1 raster
-  attributes, RGB color registers scaled to 0–100, 6-row bands with per-color
-  RLE. Colors are collected directly from the pixels (with progressive
-  bit-dropping when the palette would exceed 256 registers) — no quantization
-  crate is used. The `rows` parameter is currently **ignored** — Sixel has no
-  cell-based row scaling, so the image renders at its native pixel size (known
-  limitation; see section 5). The renderer uses an **opaque** background
-  (terminal color or white) for the Sixel path, because Sixel transparency is
-  less universally honored than the transparent path kitty/imgcat use.
-- Uses `png` crate (decode) and `termbg::query_terminal` (DA1 probe).
-  The Sixel encoder itself is in-house and dependency-free (no sixel or
+  `set_background(r, g, b)` sets the opaque compositing color (call once at
+  startup after detecting the terminal background). `detect_cell_height(timeout)`
+  issues a **second** `termbg::query_terminal` (`\x1b[16t`, reply parsed by
+  `parse_cell_height`) and stores the terminal's character-cell pixel height.
+  `encode(png: &[u8], rows: u32)` decodes the PNG to RGBA8 using the `png` crate,
+  composites any partially-transparent pixels against the background color (the
+  Sixel encoder ignores alpha and would otherwise render those black), then pads
+  the image height up to a multiple of the sixel band (`SIXEL_BAND` = 6 rows)
+  and — when the cell height is known — to a multiple of the cell height (so
+  Windows Terminal fills no extra dark cells; the last row is replicated). It
+  then emits a standard Sixel stream: DCS introducer + 1:1 raster attributes, RGB
+  color registers on a 0–`COLOR_SCALE` (100) scale, 6-row bands with per-color
+  RLE (data chars based at `SIXEL_CHAR_BASE` = 0x3F). Colors are collected
+  directly from the pixels (progressive bit-dropping when the palette would
+  exceed 256 registers) — no quantization crate. The `rows` parameter is
+  currently **ignored** — Sixel has no cell-based row scaling, so the image
+  renders at its (cell-multiple-padded) pixel size (see section 5).
+- Uses `png` crate (decode) and `termbg::query_terminal` (DA1 + cell-size
+  probes). The Sixel encoder itself is in-house and dependency-free (no sixel or
   quantization crate).
 - No laterm module imports except `termbg::query_terminal`.
 
@@ -298,16 +353,24 @@ src/
   when it cannot be determined. Unix: `ioctl(STDOUT_FILENO, TIOCGWINSZ)` via
   `libc`. Windows: `GetConsoleScreenBufferInfo` on the stdout handle via
   `windows-sys`. No new dependencies — both crates are already used by `termbg`.
-  Platform implementations:
-  - **unix** — operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN` in
-    `c_lflag` (keeps `OPOST` so `\n`→`\r\n` translation on the output side is
-    unaffected); sets `VMIN=0 / VTIME=1`; a timed `read()` returns `Some(0)` on
-    timeout (keep polling) and `None` on error/EOF. Uses the `libc` crate.
+  Every `unsafe` block carries a `// SAFETY:` rationale. Platform
+  implementations:
+  - **unix** — `query` opens `/dev/tty` and uses an RAII `RawModeGuard`
+    (`cfmakeraw` on construct, prior termios restored on drop) so a panic in the
+    I/O cannot strand the tty in raw mode; `select(2)` for the read timeout.
+    `raw_input` operates on stdin (fd 0); clears `ECHO | ICANON | IEXTEN` in
+    `c_lflag` (keeps `OPOST` so `\n`→`\r\n` output translation is unaffected);
+    sets `VMIN=0 / VTIME=1`; a timed `read()` returns `Some(0)` on timeout (keep
+    polling) and `None` on error/EOF; its own `Drop` restores the mode. Uses the
+    `libc` crate.
   - **Windows** — operates on conin; clears `ENABLE_LINE_INPUT |
     ENABLE_ECHO_INPUT`, sets `ENABLE_VIRTUAL_TERMINAL_INPUT` so bracketed-paste
     VT sequences arrive; leaves output mode untouched; timed read via
-    `WaitForSingleObject` / `ReadConsoleA`. Uses the `windows-sys` crate.
-    Windows is not a stub — it has full OSC 11 parity.
+    `WaitForSingleObject` / `ReadConsoleA`. The request bytes are written with
+    `WriteConsoleA` to the **console output handle** (not `std::io::stdout`),
+    matching the unix `/dev/tty` write so the stdout invariant holds. Handles are
+    validated against `windows-sys`' `INVALID_HANDLE_VALUE`. Uses the
+    `windows-sys` crate. Windows is not a stub — it has full OSC 11 parity.
 - No dependencies on other laterm modules.
 
 **`logging`**
@@ -316,11 +379,13 @@ src/
   given, file output at mode 0600, append. Acquires an exclusive writer lock
   for the process lifetime (unix: advisory `flock(LOCK_EX | LOCK_NB)` via the
   existing `libc` dependency; windows: `OpenOptions::share_mode(FILE_SHARE_READ)`
-  via std `OpenOptionsExt`). A second instance that fails to acquire the lock
-  prints one warning to stderr and disables logging for that instance; readers
-  (e.g. `tail -f`) are unaffected. Parse and apply log level from
-  `LATERM_LOG_LEVEL`. If the file cannot be opened (permission denied, etc.),
-  prints one warning to stderr and disables logging for the run.
+  via std `OpenOptionsExt`, with `FILE_SHARE_READ` taken from `windows-sys`
+  (feature `Win32_Storage_FileSystem`) rather than a hand-rolled `0x1` literal).
+  A second instance that fails to acquire the lock prints one warning to stderr
+  and disables logging for that instance; readers (e.g. `tail -f`) are
+  unaffected. Parse and apply log level from `LATERM_LOG_LEVEL`. If the file
+  cannot be opened (permission denied, etc.), prints one warning to stderr and
+  disables logging for the run.
 - Never writes to stdout.
 
 ### Dependency Direction
@@ -328,25 +393,30 @@ src/
 ```
 main
   |
+  +---> feed ----> mathscan
+  |          \---> render    (ratex-parser, ratex-layout, ratex-render, ratex-types)
+  |          \---> graphics  (base64; kitty/imgcat encoders are private fns here)
+  |          |          \--> sixel (png; calls termbg::query_terminal)
+  |          \---> logging
+  +---> input ---> feed
+  |          \---> termbg
   +---> watch
   +---> convo
-  +---> mathscan
-  +---> render  (uses ratex-parser, ratex-layout, ratex-render, ratex-types)
-  +---> graphics --> kitty  (uses base64)
-  |             |--> imgcat (uses base64)
-  |             \--> sixel  (uses png; calls termbg::query_terminal)
   +---> termbg
   +---> logging
 
 (all modules may use logging)
 ```
 
-Dependency direction is strictly downward. No cycles. `watch`, `convo`, and
-`mathscan` depend only on the standard library; they do not import any other
-laterm module. `termbg` uses `libc` (unix) or `windows-sys` (Windows) for
-raw-mode terminal I/O. `render` is the only module that imports the RaTeX
-crates. `main` uses the `ctrlc` crate for cross-platform signal handling
-(SIGINT/SIGTERM). `main` selects a protocol via `graphics::select`.
+Dependency direction is strictly downward. The only inter-feed edge is
+`input → feed`; `feed` does not depend on `input`, so there is no cycle.
+`watch`, `convo`, and `mathscan` depend only on the standard library; they do not
+import any other laterm module. `feed` orchestrates `mathscan`/`render`/
+`graphics`; `input` reads stdin via `termbg` and renders via `feed`. `termbg`
+uses `libc` (unix) or `windows-sys` (Windows) for raw-mode terminal I/O. `render`
+is the only module that imports the RaTeX crates. `main` uses the `ctrlc` crate
+for cross-platform signal handling (SIGINT/SIGTERM) and selects a protocol via
+`graphics::select` exactly once.
 
 ### Dependency Justification
 
@@ -363,7 +433,7 @@ crates. `main` uses the `ctrlc` crate for cross-platform signal handling
 | `chrono` v0.4 | `main` | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | `ctrlc` v3 | `main` | Cross-platform SIGINT/SIGTERM handler (MIT/Apache-2.0) |
 | `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`); `logging` (unix only) | termios raw mode + `select(2)` for OSC 11 background query; `ioctl(TIOCGWINSZ)` for terminal width; `flock(LOCK_EX \| LOCK_NB)` for the exclusive log-file writer lock |
-| `windows-sys` v0.59 | `termbg` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`) for OSC 11 background query; `GetConsoleScreenBufferInfo` for terminal width |
+| `windows-sys` v0.59 | `termbg`, `logging` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`, `WriteConsoleA`) for OSC 11 / DA1 / cell-size queries; `GetConsoleScreenBufferInfo` for terminal width; `INVALID_HANDLE_VALUE` for handle validation; `FILE_SHARE_READ` (feature `Win32_Storage_FileSystem`) for the log-file share mode |
 
 No other external dependencies are permitted without updating this table and
 providing justification.
@@ -377,9 +447,20 @@ complete. Organized by component, in implementation priority order.
 
 ### Sidecar startup (Priority 1)
 
-- `laterm` spawns no child process. Accepted flags: `--log <PATH>`,
-  `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`. Unknown flags or a
-  missing/empty `--log` argument exit non-zero with a usage message to stderr.
+- `laterm` spawns no child process. Accepted flags: `-C`/`--cwd <PATH>`,
+  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes), `--version`/`-V`,
+  `--help`/`-h`.
+  Unknown flags or a missing/empty `--log`, `--cwd`, or `-C` argument exit
+  non-zero with a usage message to stderr.
+- `-C`/`--cwd <PATH>` sets the working directory used to derive the watched log
+  dir, via `set_current_dir(PATH)` before dir derivation (footgun-free: the
+  existing derivation then mangles the OS-canonical absolute path). A
+  `set_current_dir` failure prints an error to stderr and exits non-zero.
+- After protocol selection and dir derivation, `main` prints one plain-color
+  stdout line `laterm <version> monitoring <dir>/` (`<dir>` tilde-collapsed
+  under home, trailing `/`). If the derived dir does not exist, a second
+  plain-color stdout line warns that there is no conversation log yet (paste
+  still works); laterm keeps running.
 - If the terminal supports none of kitty, imgcat, or Sixel (`graphics::select`
   returns `None`), laterm prints a clear error to stderr and exits non-zero
   immediately. No further work is done.
@@ -390,8 +471,8 @@ complete. Organized by component, in implementation priority order.
   black-on-white is used. Detection failure is not fatal.
 - If `std::env::current_dir()` fails, laterm prints an error to stderr and
   exits non-zero.
-- If the derived log directory does not yet exist, laterm waits (polling
-  continues) rather than exiting.
+- If the derived log directory does not yet exist, laterm prints the missing-dir
+  warning line and waits (polling continues) rather than exiting.
 - SIGINT and SIGTERM stop the poll loop and cause laterm to exit 0.
 - Manual input: stdin is placed in raw mode via `termbg::raw_input()` (echo
   OFF, canonical mode OFF, `ISIG` preserved). Bracketed paste is enabled
@@ -399,9 +480,13 @@ complete. Organized by component, in implementation priority order.
   into the window is captured silently between the bracketed-paste markers and
   rendered through the same path as a conversation entry (full echo: prose
   verbatim, delimited math rendered in place). Each rendered entry — conversation
-  or paste — is prefixed with a role marker (`(u)> ` bold green, `[a]> ` bold
-  cyan, `{p}> ` bold magenta) and followed by a single blank-line separator; the
-  marker is written once per entry, color reset before content, basic-ANSI palette.
+  or paste — is bracketed by a matched role marker pair (opening `(u)> ` / closing
+  `<(u)` bold green, `[a]> ` / `<[a]` bold cyan, `{p}> ` / `<{p}` bold
+  magenta); the closing marker is appended inline at the end of the last line, or
+  on its own line when the entry ends with a block image. The entry's prose is
+  tinted in the role's non-bold color; math images render neutral. Color is reset
+  before the blank-line separator. One marker-pair per entry, basic-ANSI palette,
+  followed by a single blank-line separator.
   Pressing Enter/Return writes a separator to stdout: a blank line, a
   terminal-width rule of `═` (U+2550) characters in bold yellow (width via
   `termbg::term_width()`, default 80), and a newline. If the last output was
@@ -478,9 +563,11 @@ complete. Organized by component, in implementation priority order.
 
 ### Cross-cutting
 
-- Nothing appears on stdout except ANSI role markers, verbatim conversation
-  text, graphics-protocol escape sequences (kitty, imgcat, or Sixel), blank-line
-  entry separators, and the `═` separator rule.
+- Nothing appears on stdout except the plain-color startup line (and optional
+  missing-dir warning) written by `main`, ANSI role markers (open+close pair,
+  bold), role-tinted body text (non-bold), verbatim conversation text,
+  graphics-protocol escape sequences (kitty, imgcat, or Sixel), blank-line entry
+  separators, and the `═` separator rule.
 - No logging unless `--log <PATH>` is given (no default path). When enabled:
   mode-0600 append, exclusive writer lock held for the process lifetime. A
   second instance pointed at the same path fails to acquire the lock, prints
@@ -509,7 +596,7 @@ Claude Code process
   | appends entries to ~/.claude/projects/<cwd>/.../*.jsonl
   v
 
-[watch: poll ~500ms]
+[watch: poll ~250ms]
   |
   | one complete jsonl entry per line
   v
@@ -520,10 +607,11 @@ Claude Code process
   | (None for other entry types, empty content, parse failure)
   v
 
-[mathscan::scan]
+[feed::emit_entry(style, texts, &RenderCtx)]   (under the shared output mutex)
   |
-  | Vec<Segment> — flat, document-order interleaving of Text and Math segments
-  | (newlines preserved; math-free text is included, not dropped)
+  | for each text: mathscan::scan ->
+  |   Vec<Segment> — flat, document-order interleaving of Text and Math segments
+  |   (newlines preserved; math-free text is included, not dropped)
   v
 
 walk flat segment list in order:
@@ -538,14 +626,23 @@ walk flat segment list in order:
                      v
                   rows = max(1, round(height / reference_X_height × 1.25))
                   height >= 1.5× reference_X_height ?
-                      block layout: newline + proto.encode(png, rows) + newline
-                    : inline layout: proto.encode(png, rows) in flow
-                  (proto = kitty if available, else imgcat, else sixel;
-                   glyph color contrasts the detected terminal background;
-                   sixel path uses opaque background; sixel ignores rows — native size)
+                      block layout: newline + ctx.proto.encode(png, rows) + newline
+                    : inline layout: ctx.proto.encode(png, rows) in flow
+                  (ctx.proto selected ONCE in main: kitty if available, else
+                   imgcat, else sixel; glyph color contrasts the detected
+                   terminal background; sixel path uses opaque background and
+                   pads to cell multiples; sixel ignores rows)
 
-per entry: role marker (basic-ANSI color) + full conversation text +
-            rendered images in document order + trailing blank line
+per entry (one marker-pair, not per line):
+            bold open marker + role-tinted body text (non-bold) +
+            rendered images in document order (images neutral) +
+            bold close marker (inline, or own-line if image-final) +
+            color reset + trailing blank line
+
+catch-up: same path — each replayed jsonl entry's segments are grouped and
+          emitted with a single feed::emit_entry call, so framing is
+          byte-identical to the live tail (one marker-pair per entry).
+manual paste (input thread): same feed::emit_entry path, PASTE_STYLE marker.
 ```
 
 ---
@@ -563,13 +660,17 @@ per entry: role marker (basic-ANSI color) + full conversation text +
   background query; terminals that do not answer (within 200 ms) get the
   black-on-white fallback rather than theme-matched glyphs.
 
-- **Polling, not inotify.** The watcher uses a 500 ms polling interval. Math in
-  a conversation entry may appear up to 500 ms after it is written.
+- **Polling, not inotify.** The watcher uses a ~250 ms polling interval. Math in
+  a conversation entry may appear up to that long after it is written.
 
 - **Sixel does not scale to terminal cell size.** kitty and imgcat use the
   proportional `rows` value to adapt image height to the terminal's cell
-  dimensions. The Sixel encoder ignores `rows` and renders at native pixel
-  size. Sixel cell-based scaling is a planned improvement.
+  dimensions. The Sixel encoder ignores `rows`: the image renders at its native
+  pixel height, padded **up** to a whole number of sixel bands and (when the
+  cell height was detected via `\x1b[16t`) a whole number of character cells, so
+  Windows Terminal does not show extra dark cells. It does not scale the image
+  *down/up* to a target row count. Proportional `rows` scaling for Sixel is a
+  planned improvement.
 
 ---
 

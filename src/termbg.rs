@@ -110,47 +110,67 @@ mod platform {
 
         let fd = tty.as_raw_fd();
 
+        // SAFETY: `fd` is a live fd owned by `tty` for the duration of this
+        // call; isatty only reads its descriptor-table state.
         if unsafe { libc::isatty(fd) } == 0 {
             return None;
         }
 
-        let old = raw_mode_enable(fd)?;
+        // RAII: the prior termios is restored on drop, even if the closure
+        // below panics — the tty is never left in raw mode.
+        let _guard = RawModeGuard::enable(fd)?;
 
-        let result = (|| {
-            tty.write_all(request).ok()?;
-            tty.flush().ok()?;
+        tty.write_all(request).ok()?;
+        tty.flush().ok()?;
 
-            let mut buf = [0u8; 64];
-            let n = read_with_timeout(fd, &mut buf, timeout)?;
-            std::str::from_utf8(&buf[..n]).ok().map(str::to_string)
-        })();
-
-        raw_mode_disable(fd, &old);
-        result
+        let mut buf = [0u8; 64];
+        let n = read_with_timeout(fd, &mut buf, timeout)?;
+        std::str::from_utf8(&buf[..n]).ok().map(str::to_string)
     }
 
-    fn raw_mode_enable(fd: RawFd) -> Option<libc::termios> {
-        unsafe {
-            let mut old: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut old) != 0 {
-                return None;
+    /// Puts `fd` into full raw mode (`cfmakeraw`) on construction and restores
+    /// the prior termios on drop. Panic-safe: the restore runs during unwind,
+    /// so a panic in the I/O between enable and drop can't strand the tty raw.
+    struct RawModeGuard {
+        fd:  RawFd,
+        old: libc::termios,
+    }
+
+    impl RawModeGuard {
+        fn enable(fd: RawFd) -> Option<RawModeGuard> {
+            // SAFETY: `fd` is a valid tty fd (checked by the caller). `old` is
+            // zeroed then fully populated by tcgetattr before any read; tcsetattr
+            // receives a valid termios derived from it. All calls are checked.
+            unsafe {
+                let mut old: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(fd, &mut old) != 0 {
+                    return None;
+                }
+                let mut raw = old;
+                libc::cfmakeraw(&mut raw);
+                if libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) != 0 {
+                    return None;
+                }
+                Some(RawModeGuard { fd, old })
             }
-            let mut raw = old;
-            libc::cfmakeraw(&mut raw);
-            if libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) != 0 {
-                return None;
-            }
-            Some(old)
         }
     }
 
-    fn raw_mode_disable(fd: RawFd, old: &libc::termios) {
-        unsafe {
-            libc::tcsetattr(fd, libc::TCSAFLUSH, old);
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            // SAFETY: `self.fd` was a valid tty fd at construction and `self.old`
+            // is the genuine prior termios captured then; restoring it is sound.
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.old);
+            }
         }
     }
 
     fn read_with_timeout(fd: RawFd, buf: &mut [u8], timeout: Duration) -> Option<usize> {
+        // SAFETY: `tv` and `readfds` are stack-owned and fully initialized
+        // (zeroed then FD_SET) before select reads them; `fd` is a live tty fd;
+        // select's nfds is `fd + 1`; read writes at most `buf.len()` bytes into
+        // the caller's buffer via a valid pointer+len pair.
         unsafe {
             let mut tv = libc::timeval {
                 tv_sec:  timeout.as_secs() as libc::time_t,
@@ -186,6 +206,11 @@ mod platform {
     impl RawInput {
         pub fn enable() -> Option<RawInput> {
             let fd = libc::STDIN_FILENO;
+            // SAFETY: fd 0 (stdin) is a valid descriptor; we verify it is a tty
+            // before touching it. `old` is zeroed then fully populated by
+            // tcgetattr before being read or stored; `raw` is a checked copy of
+            // it. All libc calls have their return values checked. RAII (Drop)
+            // restores `old`, so the tty is never stranded in raw mode.
             unsafe {
                 if libc::isatty(fd) == 0 {
                     return None;
@@ -210,6 +235,10 @@ mod platform {
         /// timeout here returns `Some(0)` so the caller keeps polling; `None`
         /// means a real error or EOF and the loop should stop.
         pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Option<usize> {
+            // SAFETY: `tv`/`readfds` are stack-owned and initialized before use;
+            // `self.fd` is the live tty fd captured in `enable`; select's nfds is
+            // `self.fd + 1`; read writes at most `buf.len()` bytes through the
+            // caller's valid pointer+len pair.
             unsafe {
                 let mut tv = libc::timeval {
                     tv_sec:  timeout.as_secs() as libc::time_t,
@@ -238,6 +267,8 @@ mod platform {
 
     impl Drop for RawInput {
         fn drop(&mut self) {
+            // SAFETY: `self.fd` was a valid tty fd at `enable` and `self.old` is
+            // the genuine prior termios captured there; restoring it is sound.
             unsafe {
                 libc::tcsetattr(self.fd, libc::TCSANOW, &self.old);
             }
@@ -245,6 +276,9 @@ mod platform {
     }
 
     pub fn term_width() -> usize {
+        // SAFETY: `ws` is stack-owned and zeroed; ioctl(TIOCGWINSZ) writes a
+        // winsize through the &mut, and STDOUT_FILENO is a valid descriptor.
+        // We use the result only when the call succeeds and ws_col > 0.
         unsafe {
             let mut ws: libc::winsize = std::mem::zeroed();
             if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
@@ -263,14 +297,19 @@ mod platform {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
         GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleA, SetConsoleMode,
-        CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
-        ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        WriteConsoleA, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+        ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
         STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    /// True when `h` is a null or invalid console handle.
+    fn handle_invalid(h: HANDLE) -> bool {
+        h.is_null() || h == INVALID_HANDLE_VALUE
+    }
 
     pub fn query(request: &[u8], timeout: Duration) -> Option<String> {
         // Run the blocking Windows API calls in a thread so they cannot hang
@@ -284,56 +323,77 @@ mod platform {
         rx.recv_timeout(timeout).ok().flatten()
     }
 
+    // SAFETY (whole fn): every call below is a Console API call given handles
+    // obtained from GetStdHandle and validated via `handle_invalid` before use.
+    // The mode getters/setters take valid &mut/owned u32s; ReadConsoleA and
+    // WriteConsoleA receive valid pointer+len pairs into stack buffers and the
+    // checked console handles. `request`'s length fits a u32 (terminal requests
+    // are a handful of bytes). The input mode is always restored before return.
     unsafe fn do_query(request: &[u8]) -> Option<String> {
-        use std::io::Write;
+        let conin: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let hout:  HANDLE = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
 
-        let conin: HANDLE = GetStdHandle(STD_INPUT_HANDLE);
-        let hout:  HANDLE = GetStdHandle(STD_OUTPUT_HANDLE);
-
-        if conin.is_null() || conin == usize::MAX as HANDLE as *mut _ {
+        if handle_invalid(conin) || handle_invalid(hout) {
             return None;
         }
 
         // Ensure output handle has VT processing enabled.
         let mut out_mode: u32 = 0;
-        if GetConsoleMode(hout, &mut out_mode) != 0 {
-            let _ = SetConsoleMode(hout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        if unsafe { GetConsoleMode(hout, &mut out_mode) } != 0 {
+            let _ = unsafe {
+                SetConsoleMode(hout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+            };
         }
 
         // Require a real console input handle; pipes (MINGW64 stdin) fail here.
         let mut old_mode: u32 = 0;
-        if GetConsoleMode(conin, &mut old_mode) == 0 {
+        if unsafe { GetConsoleMode(conin, &mut old_mode) } == 0 {
             return None;
         }
 
         let raw_mode = (old_mode
             & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
             | ENABLE_VIRTUAL_TERMINAL_INPUT;
-        if SetConsoleMode(conin, raw_mode) == 0 {
+        if unsafe { SetConsoleMode(conin, raw_mode) } == 0 {
             return None;
         }
 
         let result = (|| {
-            let mut stdout = std::io::stdout();
-            stdout.write_all(request).ok()?;
-            stdout.flush().ok()?;
+            // Write the request to the console OUTPUT handle (not stdout) so the
+            // "only the feed writes stdout" invariant holds, mirroring the unix
+            // path which writes to its /dev/tty handle.
+            let mut written: u32 = 0;
+            let ok = unsafe {
+                WriteConsoleA(
+                    hout,
+                    request.as_ptr(),
+                    request.len() as u32,
+                    &mut written,
+                    std::ptr::null(),
+                )
+            };
+            if ok == 0 {
+                return None;
+            }
 
             let mut buf = [0u8; 64];
             let mut chars_read: u32 = 0;
-            let ok = ReadConsoleA(
-                conin,
-                buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
-                &mut chars_read,
-                std::ptr::null(),
-            );
+            let ok = unsafe {
+                ReadConsoleA(
+                    conin,
+                    buf.as_mut_ptr() as *mut _,
+                    buf.len() as u32,
+                    &mut chars_read,
+                    std::ptr::null(),
+                )
+            };
             if ok == 0 || chars_read == 0 {
                 return None;
             }
             std::str::from_utf8(&buf[..chars_read as usize]).ok().map(str::to_string)
         })();
 
-        SetConsoleMode(conin, old_mode);
+        unsafe { SetConsoleMode(conin, old_mode) };
         result
     }
 
@@ -348,9 +408,13 @@ mod platform {
 
     impl RawInput {
         pub fn enable() -> Option<RawInput> {
+            // SAFETY: `conin` comes from GetStdHandle and is validated before use;
+            // GetConsoleMode/SetConsoleMode take a valid handle and &mut/owned
+            // u32. Returns fail (None) on any error; on success Drop restores the
+            // captured `old_mode`, so the console mode is never left altered.
             unsafe {
                 let conin: HANDLE = GetStdHandle(STD_INPUT_HANDLE);
-                if conin.is_null() || conin == usize::MAX as HANDLE as *mut _ {
+                if handle_invalid(conin) {
                     return None;
                 }
                 let mut old_mode: u32 = 0;
@@ -367,6 +431,10 @@ mod platform {
         }
 
         pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Option<usize> {
+            // SAFETY: `self.conin` is the valid console handle captured in
+            // `enable`; WaitForSingleObject takes it plus a ms timeout, and
+            // ReadConsoleA writes at most `buf.len()` bytes through the caller's
+            // valid pointer+len pair, reporting the count via `&mut chars_read`.
             unsafe {
                 let ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
                 if WaitForSingleObject(self.conin, ms) != WAIT_OBJECT_0 {
@@ -390,6 +458,8 @@ mod platform {
 
     impl Drop for RawInput {
         fn drop(&mut self) {
+            // SAFETY: `self.conin` was a valid console handle at `enable` and
+            // `self.old_mode` is the genuine prior mode captured there.
             unsafe {
                 SetConsoleMode(self.conin, self.old_mode);
             }
@@ -397,9 +467,13 @@ mod platform {
     }
 
     pub fn term_width() -> usize {
+        // SAFETY: `hout` comes from GetStdHandle and is validated before use;
+        // `info` is stack-owned and zeroed before GetConsoleScreenBufferInfo
+        // writes a CONSOLE_SCREEN_BUFFER_INFO through the &mut. The window cols
+        // are read only on success.
         unsafe {
             let hout = GetStdHandle(STD_OUTPUT_HANDLE);
-            if hout.is_null() {
+            if handle_invalid(hout) {
                 return super::DEFAULT_TERM_WIDTH;
             }
             let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
