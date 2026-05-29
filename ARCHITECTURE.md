@@ -76,8 +76,9 @@ blocking defect.
    from the basic 8-color palette so they track the user's terminal color scheme
    rather than imposing fixed hues. Entries with no renderable content emit
    nothing (no marker). Each entry is followed by a single blank-line separator.
-   stdout is written only by `main` and the output-feed modules (`feed` emits
-   the markers + tinted prose + images; `input` emits paste renders, the
+   stdout is written only by `main` and the output-feed modules (`main` emits
+   the plain-color startup line and the optional missing-dir warning; `feed`
+   emits the markers + tinted prose + images; `input` emits paste renders, the
    separator rule, and BEL); no other module writes stdout.
 
 **Resilience**
@@ -154,9 +155,14 @@ modules — together with `main` they are the only modules that write to stdout.
 ### Module Responsibilities and Constraints
 
 **`main`**
-- Responsibility (wiring only): Parse CLI flags (`--log`, `--catch-up`,
-  `--help`/`--version`). Initialize logging. Derive the Claude Code log
-  directory for the current working directory. Select a graphics protocol via
+- Responsibility (wiring only): Parse CLI flags (`-C`/`--cwd`, `--log`,
+  `--catch-up`, `--help`/`--version`). If `-C`/`--cwd <PATH>` is given,
+  `set_current_dir(PATH)` **before** deriving the log dir, so the existing
+  `current_dir()`-based derivation produces the same canonical absolute path the
+  OS gives Claude Code and the dir-name mangling matches by construction (no
+  manual canonicalization). Initialize logging. Derive the Claude Code log
+  directory for the (possibly changed) working directory. Print the startup line
+  (see below). Select a graphics protocol via
   `graphics::select` **once**, exit immediately (clear error) if none of kitty,
   imgcat, or Sixel is supported, and wrap it in an `Arc` shared by catch-up, the
   watch loop, and the reader thread (so the sixel DA1 probe runs exactly once).
@@ -172,6 +178,18 @@ modules — together with `main` they are the only modules that write to stdout.
   watch loop cleanly.
 - Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
   absolute working directory path is replaced by `-`.
+- Startup line: after the protocol is selected and the log dir is derived (and
+  after any `-C` chdir), `main` writes ONE plain-color line to stdout (no SGR
+  role color, no role marker): `laterm <version> monitoring <dir>/`, where
+  `<version>` is `CARGO_PKG_VERSION` and `<dir>` is the derived watch dir
+  tilde-collapsed (the home prefix — HOME on unix / USERPROFILE on windows, the
+  same source `project_log_dir` uses — replaced by `~`; otherwise the absolute
+  path), with a trailing `/`. The collapse is a pure helper (`display_dir`).
+- Missing-dir warning: if the derived dir does not exist at startup, `main`
+  writes a second plain-color stdout line right under the startup line phrased
+  as not-yet (paste still works), e.g. `  no conversation log for this directory
+  yet — paste to render, or start Claude Code here`. The watcher still waits for
+  the dir; laterm does not exit.
 - Must NOT contain: rendering, parsing, marker, or protocol logic. This is
   wiring only.
 
@@ -429,9 +447,19 @@ complete. Organized by component, in implementation priority order.
 
 ### Sidecar startup (Priority 1)
 
-- `laterm` spawns no child process. Accepted flags: `--log <PATH>`,
-  `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`. Unknown flags or a
-  missing/empty `--log` argument exit non-zero with a usage message to stderr.
+- `laterm` spawns no child process. Accepted flags: `-C`/`--cwd <PATH>`,
+  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes), `--help`/`-h`.
+  Unknown flags or a missing/empty `--log`, `--cwd`, or `-C` argument exit
+  non-zero with a usage message to stderr.
+- `-C`/`--cwd <PATH>` sets the working directory used to derive the watched log
+  dir, via `set_current_dir(PATH)` before dir derivation (footgun-free: the
+  existing derivation then mangles the OS-canonical absolute path). A
+  `set_current_dir` failure prints an error to stderr and exits non-zero.
+- After protocol selection and dir derivation, `main` prints one plain-color
+  stdout line `laterm <version> monitoring <dir>/` (`<dir>` tilde-collapsed
+  under home, trailing `/`). If the derived dir does not exist, a second
+  plain-color stdout line warns that there is no conversation log yet (paste
+  still works); laterm keeps running.
 - If the terminal supports none of kitty, imgcat, or Sixel (`graphics::select`
   returns `None`), laterm prints a clear error to stderr and exits non-zero
   immediately. No further work is done.
@@ -442,8 +470,8 @@ complete. Organized by component, in implementation priority order.
   black-on-white is used. Detection failure is not fatal.
 - If `std::env::current_dir()` fails, laterm prints an error to stderr and
   exits non-zero.
-- If the derived log directory does not yet exist, laterm waits (polling
-  continues) rather than exiting.
+- If the derived log directory does not yet exist, laterm prints the missing-dir
+  warning line and waits (polling continues) rather than exiting.
 - SIGINT and SIGTERM stop the poll loop and cause laterm to exit 0.
 - Manual input: stdin is placed in raw mode via `termbg::raw_input()` (echo
   OFF, canonical mode OFF, `ISIG` preserved). Bracketed paste is enabled
@@ -534,10 +562,11 @@ complete. Organized by component, in implementation priority order.
 
 ### Cross-cutting
 
-- Nothing appears on stdout except ANSI role markers (open+close pair, bold),
-  role-tinted body text (non-bold), verbatim conversation text, graphics-protocol
-  escape sequences (kitty, imgcat, or Sixel), blank-line entry separators, and
-  the `═` separator rule.
+- Nothing appears on stdout except the plain-color startup line (and optional
+  missing-dir warning) written by `main`, ANSI role markers (open+close pair,
+  bold), role-tinted body text (non-bold), verbatim conversation text,
+  graphics-protocol escape sequences (kitty, imgcat, or Sixel), blank-line entry
+  separators, and the `═` separator rule.
 - No logging unless `--log <PATH>` is given (no default path). When enabled:
   mode-0600 append, exclusive writer lock held for the process lifetime. A
   second instance pointed at the same path fails to acquire the lock, prints

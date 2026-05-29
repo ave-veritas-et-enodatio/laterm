@@ -19,7 +19,7 @@ Windows Terminal, or any Sixel-capable terminal window:
 ```sh
 cargo run --release
 # or, if installed on PATH:
-laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 ```
 
 It spawns no child process. It derives the Claude Code log directory, tails
@@ -89,9 +89,18 @@ DA1 probe and is larger).
 
 ### Module responsibilities in brief
 
-**`main`** — Wiring only. Parse CLI flags (`--log`, `--catch-up`,
-`--help`/`--version`). Initialize logging. Derive the Claude Code log directory
-for the current working directory (`~/.claude/projects/<cwd-with-slashes-as-dashes>`).
+**`main`** — Wiring only. Parse CLI flags (`-C`/`--cwd`, `--log`, `--catch-up`,
+`--help`/`--version`). If `-C`/`--cwd <PATH>` is given, `set_current_dir(PATH)`
+**before** deriving the log dir (footgun-free: the existing `current_dir()`
+derivation then mangles the OS-canonical absolute path, so the dir name matches
+by construction). Initialize logging. Derive the Claude Code log directory for
+the (possibly changed) working directory
+(`~/.claude/projects/<cwd-with-slashes-as-dashes>`). After protocol selection
+and dir derivation, write the plain-color startup line `laterm <version>
+monitoring <dir>/` (`<dir>` tilde-collapsed under home via the `display_dir`
+helper, trailing `/`) — and, when the derived dir does not exist, a second
+plain-color stdout line warning there is no conversation log yet (paste still
+works); laterm keeps running and the watcher waits for the dir.
 Select a graphics protocol via `graphics::select` **once** and exit immediately
 with an error if none of kitty, imgcat, or Sixel is supported; the single
 `Arc<graphics::Protocol>` is shared by catch-up, the watch loop, and the reader
@@ -280,7 +289,9 @@ These are invariants from ARCHITECTURE.md. Violating any is a blocking defect.
   `sixel` calls `termbg::query_terminal` (DA1 + cell-height probes); that is its
   only laterm import.
 - **stdout is written only by `main` and the output-feed modules (`feed`,
-  `input`).** No other module may write to `std::io::stdout` — `convo`,
+  `input`).** `main` writes the plain-color startup line and the optional
+  missing-dir warning; `feed`/`input` write the rendered feed. No other module
+  may write to `std::io::stdout` — `convo`,
   `mathscan`, `watch`, `render`, `graphics`, `sixel`, `termbg`, and `logging`
   must not. Logging goes to file or stderr.
 - **RaTeX crates confined to `render`.** No other module imports
@@ -459,9 +470,10 @@ used by Claude Code; do not change it unilaterally.
 
 ### Missing log directory is not an error
 
-If the derived log directory does not exist when laterm starts, the watcher
-waits silently until it appears. This is normal when laterm is started before
-Claude Code has opened the project.
+If the derived log directory does not exist when laterm starts, laterm prints a
+one-line plain-color warning (no conversation log yet — paste still works) and
+the watcher waits until the dir appears. This is normal when laterm is started
+before Claude Code has opened the project; laterm does not exit.
 
 ### Render errors are non-fatal
 

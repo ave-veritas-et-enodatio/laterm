@@ -79,14 +79,22 @@ Both markers and body tint are readable in light and dark themes.
 ## Usage / Options
 
 ```
-laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
+laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 ```
 
 | Flag | Description |
 |---|---|
+| `--cwd <PATH>`, `-C` | Derive the watched log directory from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
 | `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |
 | `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
 | `--help`, `-h` | Print usage and exit. |
+
+At startup laterm prints one plain-color line — `laterm <version> monitoring
+<dir>/` — naming the conversation-log directory it watches (tilde-collapsed when
+under your home directory), so the window does not look dead. If that directory
+does not exist yet (Claude Code has not been started there), a second line warns
+that there is no conversation log yet; laterm keeps running and waits for it, and
+you can paste text to render in the meantime.
 
 ## How It Works
 

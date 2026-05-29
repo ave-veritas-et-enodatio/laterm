@@ -33,6 +33,8 @@ Renders LaTeX math from the current Claude Code conversation log as inline
 terminal images.
 
 options:
+  --cwd <PATH>, -C      derive the watched log dir from PATH instead of the
+                        current working directory
   --log <PATH>          write diagnostics to PATH (default: no logging)
   --catch-up[=<MINS>]   render math from the last MINS minutes of history
                         before tailing (bare flag = 5 minutes)
@@ -41,6 +43,7 @@ options:
 ";
 
 struct Args {
+    cwd: Option<PathBuf>,
     log: Option<PathBuf>,
     catch_up: Option<i64>,
 }
@@ -57,6 +60,7 @@ enum Invocation {
 /// perform, or Err with a message on a malformed argument.
 fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
     let mut args = Args {
+        cwd: None,
         log: None,
         catch_up: None,
     };
@@ -67,6 +71,14 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
             return Ok(Invocation::Help);
         } else if arg == "--version" || arg == "-V" {
             return Ok(Invocation::Version);
+        } else if arg == "--cwd" || arg == "-C" {
+            let path = it.next().ok_or("--cwd requires a path argument")?;
+            args.cwd = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--cwd=") {
+            if path.is_empty() {
+                return Err("--cwd requires a path argument".to_string());
+            }
+            args.cwd = Some(PathBuf::from(path));
         } else if arg == "--log" {
             let path = it.next().ok_or("--log requires a path argument")?;
             args.log = Some(PathBuf::from(path));
@@ -114,6 +126,18 @@ fn run() -> i32 {
         }
     };
 
+    // Honor `-C`/`--cwd` before anything reads the CWD. The existing
+    // `current_dir()`-based derivation then yields the same canonical absolute
+    // path the OS gives Claude Code, so the dir-name mangling matches by
+    // construction (no manual canonicalization). Nothing before dir derivation
+    // depends on CWD (logging is explicit; protocol/theme don't use it).
+    if let Some(p) = &args.cwd
+        && let Err(e) = std::env::set_current_dir(p)
+    {
+        eprintln!("laterm: cannot change directory to {}: {e}", p.display());
+        return 1;
+    }
+
     // No logging by default — opt in with `--log <PATH>`. Avoids multiple
     // instances clobbering one shared default file; enable it for diagnostics.
     if let Some(path) = &args.log {
@@ -149,6 +173,22 @@ fn run() -> i32 {
         }
     };
     logging::info(&format!("watching {}", dir.display()));
+
+    // Startup line so the window doesn't look dead — standard terminal color,
+    // no role marker/SGR. main is allowed to write stdout. The watch dir is
+    // tilde-collapsed for legibility.
+    println!(
+        "laterm {} monitoring {}/",
+        env!("CARGO_PKG_VERSION"),
+        display_dir(&dir, dirs_home().as_deref())
+    );
+    // If the dir isn't there yet the watcher waits (it does not exit); surface
+    // that as a not-yet signal, noting paste still works.
+    if !dir.exists() {
+        println!(
+            "  no conversation log for this directory yet — paste to render, or start Claude Code here"
+        );
+    }
 
     // Shutdown flag shared between threads.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -324,6 +364,18 @@ fn project_log_dir() -> Result<PathBuf, String> {
     Ok(home.join(".claude").join("projects").join(name))
 }
 
+/// Render `dir` for the startup line: if it is under `home`, collapse that
+/// prefix to `~`; otherwise show it unchanged. Uses the same home source as
+/// [`project_log_dir`] so the collapse is consistent. Pure for unit testing.
+fn display_dir(dir: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = dir.strip_prefix(home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    dir.display().to_string()
+}
+
 fn dirs_home() -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -357,8 +409,44 @@ mod tests {
     #[test]
     fn no_args_defaults() {
         let a = run_args(argv(&[]));
+        assert!(a.cwd.is_none());
         assert!(a.log.is_none());
         assert!(a.catch_up.is_none());
+    }
+
+    #[test]
+    fn cwd_short_long_and_equals_forms() {
+        let short = run_args(argv(&["-C", "/tmp"]));
+        assert_eq!(short.cwd, Some(PathBuf::from("/tmp")));
+        let long = run_args(argv(&["--cwd", "/tmp"]));
+        assert_eq!(long.cwd, Some(PathBuf::from("/tmp")));
+        let eq = run_args(argv(&["--cwd=/tmp"]));
+        assert_eq!(eq.cwd, Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn cwd_missing_value_errors() {
+        assert!(parse_args(argv(&["-C"])).is_err());
+        assert!(parse_args(argv(&["--cwd"])).is_err());
+        assert!(parse_args(argv(&["--cwd="])).is_err());
+    }
+
+    #[test]
+    fn display_dir_collapses_under_home() {
+        let home = PathBuf::from("/Users/benn");
+        let dir = PathBuf::from("/Users/benn/.claude/projects/-Users-benn-projects-laterm");
+        assert_eq!(
+            display_dir(&dir, Some(&home)),
+            "~/.claude/projects/-Users-benn-projects-laterm"
+        );
+    }
+
+    #[test]
+    fn display_dir_passes_through_outside_home() {
+        let home = PathBuf::from("/Users/benn");
+        let dir = PathBuf::from("/var/data/-x");
+        assert_eq!(display_dir(&dir, Some(&home)), "/var/data/-x");
+        assert_eq!(display_dir(&dir, None), "/var/data/-x");
     }
 
     #[test]
