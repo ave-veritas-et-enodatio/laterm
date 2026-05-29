@@ -45,42 +45,18 @@ fn math(s: &str, display: bool) -> Segment {
 /// Scan returns the full interleaved text/math stream in document order, with
 /// newlines preserved inside Text segments. Empty input yields an empty vec;
 /// text with no math yields a single Text segment holding the whole text.
+///
+/// The scanner builds `Segment`s directly — text runs accumulate in `buf` and
+/// are flushed as a `Text` segment whenever a math span is found or at the end.
 pub fn scan(text: &str) -> Vec<Segment> {
-    tokenize(text)
-        .into_iter()
-        .map(|t| {
-            if t.is_math {
-                math(&t.text, t.display)
-            } else {
-                txt(&t.text)
-            }
-        })
-        .collect()
-}
-
-// ---- tokenizer ----
-
-#[derive(Debug, Clone)]
-struct Token {
-    is_math: bool,
-    text: String,
-    display: bool,
-}
-
-/// Tokenize splits text into literal text tokens and math tokens, in order.
-fn tokenize(text: &str) -> Vec<Token> {
     let runes: Vec<char> = text.chars().collect();
     let n = runes.len();
-    let mut toks: Vec<Token> = Vec::new();
+    let mut segs: Vec<Segment> = Vec::new();
     let mut buf: Vec<char> = Vec::new();
 
-    let flush = |buf: &mut Vec<char>, toks: &mut Vec<Token>| {
+    let flush = |buf: &mut Vec<char>, segs: &mut Vec<Segment>| {
         if !buf.is_empty() {
-            toks.push(Token {
-                is_math: false,
-                text: buf.iter().collect(),
-                display: false,
-            });
+            segs.push(txt(&buf.iter().collect::<String>()));
             buf.clear();
         }
     };
@@ -106,18 +82,10 @@ fn tokenize(text: &str) -> Vec<Token> {
         // \( -> inline math;  \[ -> display math.
         if r == '\\' && i + 1 < n && (runes[i + 1] == '(' || runes[i + 1] == '[') {
             let display = runes[i + 1] == '[';
-            let close: Vec<char> = if display {
-                vec!['\\', ']']
-            } else {
-                vec!['\\', ')']
-            };
+            let close: [char; 2] = if display { ['\\', ']'] } else { ['\\', ')'] };
             if let Some((expr, end)) = scan_to(&runes, i + 2, &close) {
-                flush(&mut buf, &mut toks);
-                toks.push(Token {
-                    is_math: true,
-                    text: expr,
-                    display,
-                });
+                flush(&mut buf, &mut segs);
+                segs.push(math(&expr, display));
                 i = end;
                 continue;
             }
@@ -129,12 +97,8 @@ fn tokenize(text: &str) -> Vec<Token> {
         // $$ -> display math (must be tested before single $).
         if r == '$' && i + 1 < n && runes[i + 1] == '$' {
             if let Some((expr, end)) = scan_to(&runes, i + 2, &['$', '$']) {
-                flush(&mut buf, &mut toks);
-                toks.push(Token {
-                    is_math: true,
-                    text: expr,
-                    display: true,
-                });
+                flush(&mut buf, &mut segs);
+                segs.push(math(&expr, true));
                 i = end;
                 continue;
             }
@@ -146,12 +110,8 @@ fn tokenize(text: &str) -> Vec<Token> {
         // $ -> inline math.
         if r == '$' {
             if let Some((expr, end)) = scan_to(&runes, i + 1, &['$']) {
-                flush(&mut buf, &mut toks);
-                toks.push(Token {
-                    is_math: true,
-                    text: expr,
-                    display: false,
-                });
+                flush(&mut buf, &mut segs);
+                segs.push(math(&expr, false));
                 i = end;
                 continue;
             }
@@ -163,9 +123,9 @@ fn tokenize(text: &str) -> Vec<Token> {
         buf.push(r);
         i += 1;
     }
-    flush(&mut buf, &mut toks);
+    flush(&mut buf, &mut segs);
 
-    toks
+    segs
 }
 
 /// Scan from `start` looking for `close_seq`, honoring \\ and \$ escapes.
@@ -308,5 +268,25 @@ mod tests {
     fn unterminated_span_is_literal_text() {
         let s = "a lone $ sign";
         assert_eq!(scan(s), vec![t(s)]);
+    }
+
+    #[test]
+    fn escaped_backslash_then_real_dollar_opens_math() {
+        // `\\` is a literal escaped backslash; the following `$x$` is real math.
+        // AGENTS.md calls out this case explicitly.
+        assert_eq!(scan(r"\\$x$"), vec![t(r"\\"), inl("x")]);
+        // With surrounding text on both sides.
+        assert_eq!(
+            scan(r"a\\$x$b"),
+            vec![t(r"a\\"), inl("x"), t("b")]
+        );
+    }
+
+    #[test]
+    fn unterminated_paren_and_bracket_are_literal_text() {
+        let paren = r"open \( but never closed";
+        assert_eq!(scan(paren), vec![t(paren)]);
+        let bracket = r"open \[ but never closed";
+        assert_eq!(scan(bracket), vec![t(bracket)]);
     }
 }

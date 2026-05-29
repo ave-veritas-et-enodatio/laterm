@@ -69,12 +69,11 @@ pub fn parse(line: &[u8]) -> Option<ParsedEntry> {
         Value::Array(blocks) => {
             let mut segs = Vec::new();
             for b in blocks {
-                if b.get("type").and_then(Value::as_str) == Some("text") {
-                    if let Some(text) = b.get("text").and_then(Value::as_str) {
-                        if !text.is_empty() {
-                            segs.push(Segment { role: role.clone(), text: text.to_string() });
-                        }
-                    }
+                if b.get("type").and_then(Value::as_str) == Some("text")
+                    && let Some(text) = b.get("text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    segs.push(Segment { role: role.clone(), text: text.to_string() });
                 }
             }
             if segs.is_empty() {

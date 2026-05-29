@@ -92,7 +92,7 @@ laterm [--log <PATH>] [--catch-up[=<MINS>]] [--help]
 
 1. From the working directory, LaTerm derives the Claude Code log directory:
    `~/.claude/projects/<cwd with '/' replaced by '-'>`.
-2. It polls that directory (~500 ms) and tails every `*.jsonl` conversation log.
+2. It polls that directory (~250 ms) and tails every `*.jsonl` conversation log.
    Tail-only: content present at startup is not replayed. Pass `--catch-up` to
    first replay math from recent history before the tail begins.
 3. For each new entry it extracts the text from user/assistant messages and
@@ -153,7 +153,7 @@ panicking, so bad input degrades gracefully.
   ghostty), iTerm2 imgcat (iTerm2, WezTerm), or Sixel (Windows Terminal v1.22+,
   xterm, foot, mlterm, WezTerm, and others). Selection order: kitty → imgcat →
   Sixel. No Unicode fallback; a terminal supporting none is rejected at startup.
-- **Polling latency.** The watcher polls at ~500 ms, so a rendered expression
+- **Polling latency.** The watcher polls at ~250 ms, so a rendered expression
   may appear up to that long after it is written.
 - **Background detection is best-effort.** Glyph contrast relies on an OSC 11
   query; terminals that do not answer (within 200 ms) get a black-on-white
@@ -196,4 +196,4 @@ a thin wrapper over cargo; the Go prototype keeps its own Makefile under
 | [`chrono`](https://github.com/chronotope/chrono) v0.4 | Chrono Contributors | MIT / Apache-2.0 | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | [`ctrlc`](https://github.com/Detegr/rust-ctrlc) v3 | Antti Ker&#228;nen | MIT / Apache-2.0 | Cross-platform SIGINT/SIGTERM handler |
 | [`libc`](https://github.com/rust-lang/libc) v0.2 | The Rust Project Developers | MIT / Apache-2.0 | Unix-only: termios raw mode and `select(2)` for OSC 11 background query |
-| [`windows-sys`](https://github.com/microsoft/windows-rs) v0.59 | Microsoft | MIT / Apache-2.0 | Windows-only: Console API for OSC 11 background query |
+| [`windows-sys`](https://github.com/microsoft/windows-rs) v0.59 | Microsoft | MIT / Apache-2.0 | Windows-only: Console API for OSC 11 / DA1 / cell-size queries and terminal width; `FILE_SHARE_READ` for the log-file share mode |

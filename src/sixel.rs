@@ -12,6 +12,19 @@ use std::time::Duration;
 /// Timeout for the DA1 capability probe.
 const DA1_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Rows per SIXEL band. A sixel character encodes a vertical strip of 6 pixels,
+/// so the encoder processes the image in 6-row bands and pads heights to a
+/// multiple of this.
+const SIXEL_BAND: usize = 6;
+
+/// Base sixel data character: bit pattern 0 maps to '?' (0x3F); each set bit b
+/// (row within the band) adds 1<<b. Output chars range 0x3F..=0x7E.
+const SIXEL_CHAR_BASE: u8 = 0x3F;
+
+/// SIXEL color-register components are on a 0..=100 scale (percent), unlike the
+/// 0..=255 of the source pixels.
+const COLOR_SCALE: u32 = 100;
+
 /// Opaque background color used for alpha compositing, packed as 0x00RRGGBB.
 /// Default: white (0xFFFFFF). Call set_background() once at startup.
 static BG_RGB: AtomicU32 = AtomicU32::new(0x00FFFFFF);
@@ -41,7 +54,12 @@ pub fn detect_cell_height(timeout: Duration) {
 
 fn query_cell_height(timeout: Duration) -> Option<u32> {
     let reply = crate::termbg::query_terminal(b"\x1b[16t", timeout)?;
-    // Response: \x1b[6;<height>;<width>t
+    parse_cell_height(&reply)
+}
+
+/// Parse a `\x1b[16t` reply (`\x1b[6;<height>;<width>t`) into the cell height in
+/// pixels. Tolerates a missing ESC[ prefix and requires a positive height.
+fn parse_cell_height(reply: &str) -> Option<u32> {
     let body = reply.strip_prefix("\x1b[6;").or_else(|| reply.strip_prefix("[6;"))?;
     let semi = body.find(';')?;
     body[..semi].parse::<u32>().ok().filter(|&h| h > 0)
@@ -51,9 +69,9 @@ fn query_cell_height(timeout: Duration) -> Option<u32> {
 /// character cells and complete sixel bands (bands = 6 rows each).
 fn pad_to(height: usize) -> usize {
     let cell = CELL_HEIGHT_PX.load(Ordering::Relaxed) as usize;
-    // Pad to multiples of 6 (sixel bands). If cell height is known, also pad
-    // to multiples of cell height so Windows Terminal fills no extra dark cells.
-    let quantum = if cell > 0 { lcm(6, cell) } else { 6 };
+    // Pad to multiples of the sixel band. If cell height is known, also pad to
+    // multiples of cell height so Windows Terminal fills no extra dark cells.
+    let quantum = if cell > 0 { lcm(SIXEL_BAND, cell) } else { SIXEL_BAND };
     let r = height % quantum;
     if r == 0 { height } else { height + quantum - r }
 }
@@ -168,20 +186,20 @@ fn encode_rgba(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
     out.extend_from_slice(b"\x1bP0;0;0q");
     out.extend_from_slice(format!("\"1;1;{width};{height}").as_bytes());
 
-    // Color registers, RGB on a 0..100 scale.
+    // Color registers, RGB on a 0..=COLOR_SCALE scale (rounded).
     for (i, &(r, g, b)) in palette.iter().enumerate() {
-        let scale = |c: u8| (c as u32 * 100 + 127) / 255;
+        let scale = |c: u8| (c as u32 * COLOR_SCALE + 127) / 255;
         out.extend_from_slice(
             format!("#{i};2;{};{};{}", scale(r), scale(g), scale(b)).as_bytes(),
         );
     }
 
-    let bands = height.div_ceil(6);
+    let bands = height.div_ceil(SIXEL_BAND);
     for band in 0..bands {
         let mut colors_in_band: Vec<usize> = Vec::new();
         let mut seen = vec![false; palette.len()];
-        for r in 0..6 {
-            let y = band * 6 + r;
+        for r in 0..SIXEL_BAND {
+            let y = band * SIXEL_BAND + r;
             if y >= height {
                 break;
             }
@@ -201,8 +219,8 @@ fn encode_rgba(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
             let mut run: usize = 0;
             for x in 0..width {
                 let mut value: u8 = 0;
-                for r in 0..6 {
-                    let y = band * 6 + r;
+                for r in 0..SIXEL_BAND {
+                    let y = band * SIXEL_BAND + r;
                     if y >= height {
                         break;
                     }
@@ -210,7 +228,7 @@ fn encode_rgba(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
                         value |= 1 << r;
                     }
                 }
-                let ch = 0x3F + value;
+                let ch = SIXEL_CHAR_BASE + value;
                 if x == 0 {
                     prev = ch;
                     run = 1;
@@ -330,5 +348,49 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn gcd_lcm_arithmetic() {
+        assert_eq!(gcd(6, 14), 2);
+        assert_eq!(gcd(6, 6), 6);
+        assert_eq!(gcd(6, 0), 6);
+        assert_eq!(lcm(6, 14), 42);
+        assert_eq!(lcm(6, 12), 12); // 12 is a multiple of 6
+        assert_eq!(lcm(SIXEL_BAND, 1), 6);
+    }
+
+    #[test]
+    fn pad_to_rounds_up_to_the_band() {
+        // With cell height unknown (the default), the quantum is the sixel band
+        // (6). These cases avoid mutating the shared CELL_HEIGHT_PX atomic so
+        // they stay independent of any concurrently-running encode test.
+        assert_eq!(CELL_HEIGHT_PX.load(Ordering::Relaxed), 0, "test assumes default cell height");
+        assert_eq!(pad_to(12), 12); // exact multiple of 6
+        assert_eq!(pad_to(13), 18); // one over → next band
+        assert_eq!(pad_to(7), 12); // one over the first band
+        assert_eq!(pad_to(0), 0); // empty guard: 0 % 6 == 0 → unchanged
+    }
+
+    #[test]
+    fn encode_empty_height_is_guarded() {
+        // height == 0 must not panic (no last-row slice) and yields no pixels.
+        assert!(encode_rgba(&[], 4, 0).is_empty());
+        assert!(encode_rgba(&[], 0, 4).is_empty());
+    }
+
+    #[test]
+    fn parse_cell_height_reply() {
+        // \x1b[16t reply: \x1b[6;<height>;<width>t
+        assert_eq!(parse_cell_height("\x1b[6;34;15t"), Some(34));
+        // Some terminals drop the ESC; the bare form is accepted too.
+        assert_eq!(parse_cell_height("[6;20;10t"), Some(20));
+        // Zero height is rejected (treated as unknown).
+        assert_eq!(parse_cell_height("\x1b[6;0;10t"), None);
+        // Malformed / wrong-report replies yield None.
+        assert_eq!(parse_cell_height(""), None);
+        assert_eq!(parse_cell_height("\x1b[6;abc;10t"), None);
+        assert_eq!(parse_cell_height("\x1b[8;24;80t"), None); // not a cell-size report
+        assert_eq!(parse_cell_height("\x1b[6;34"), None); // missing second ';'
     }
 }

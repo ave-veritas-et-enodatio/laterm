@@ -13,10 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// One complete JSONL entry (newline stripped) from a watched file.
-#[allow(dead_code)]
 pub struct Line {
-    pub path: PathBuf,
     pub data: Vec<u8>,
+}
+
+/// Whether `path` names a `.jsonl` conversation log. Shared by the watcher's
+/// directory scan and `main`'s catch-up scan so both agree on what to read.
+pub fn is_jsonl(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
 
 struct FileState {
@@ -80,12 +84,10 @@ fn tick(
 
     let mut jsonl_files: Vec<(PathBuf, u64)> = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.ends_with(".jsonl") {
+        let abs = dir.join(entry.file_name());
+        if !is_jsonl(&abs) {
             continue;
         }
-        let abs = dir.join(entry.file_name());
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
         jsonl_files.push((abs, size));
     }
@@ -147,31 +149,31 @@ fn read_file(
         b
     };
 
-    // Split on '\n', emit complete lines.
-    loop {
-        match buf.iter().position(|&b| b == b'\n') {
-            None => {
-                // No complete line — stash remainder as pending.
-                fs.pending = buf;
+    // Split on '\n' by advancing a cursor, so a long buffer isn't rebuilt once
+    // per line (that was O(N²) in the buffer size). Only the trailing partial
+    // line is copied — once — into `pending`.
+    let mut start = 0;
+    while let Some(rel) = buf[start..].iter().position(|&b| b == b'\n') {
+        let mut end = start + rel; // index of '\n'; line is buf[start..end]
+        if end > start && buf[end - 1] == b'\r' {
+            end -= 1; // strip a trailing CR
+        }
+        if end > start {
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            Some(idx) => {
-                let mut line = buf[..idx].to_vec();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                buf = buf[idx + 1..].to_vec();
-                if line.is_empty() {
-                    continue;
-                }
-                if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                // If send fails (receiver dropped), stop.
-                if tx.send(Line { path: path.to_path_buf(), data: line }).is_err() {
-                    return;
-                }
+            let line = buf[start..end].to_vec();
+            // If send fails (receiver dropped), stop.
+            if tx.send(Line { data: line }).is_err() {
+                return;
             }
         }
+        start += rel + 1; // advance past the '\n'
+    }
+
+    // Stash any trailing partial line (no terminating '\n') as pending.
+    if start < buf.len() {
+        buf.drain(..start);
+        fs.pending = buf;
     }
 }

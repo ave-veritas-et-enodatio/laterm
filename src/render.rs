@@ -74,16 +74,66 @@ pub fn render(latex: &str, display: bool) -> Result<(Vec<u8>, u32), RenderError>
 
     let png = render_to_png(&dl, &render_opts).map_err(RenderError::Render)?;
 
-    // Extract height from PNG IHDR: width at byte 16, height at byte 20 (big-endian u32).
+    let (_width, height) = png_dimensions(&png)?;
+    Ok((png, height))
+}
+
+/// Parse (width, height) in pixels from a PNG's IHDR: width at byte 16, height
+/// at byte 20 (big-endian u32). Returns `PngHeader` when the buffer is too short
+/// to hold an IHDR, and `ImageTooLarge` when either dimension exceeds the caps.
+fn png_dimensions(png: &[u8]) -> Result<(u32, u32), RenderError> {
     if png.len() < 24 {
         return Err(RenderError::PngHeader);
     }
     let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
     let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
-
     if width > MAX_WIDTH || height > MAX_HEIGHT {
         return Err(RenderError::ImageTooLarge);
     }
+    Ok((width, height))
+}
 
-    Ok((png, height))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a 24-byte buffer whose IHDR width/height fields carry `w`/`h`.
+    fn header(w: u32, h: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; 24];
+        buf[16..20].copy_from_slice(&w.to_be_bytes());
+        buf[20..24].copy_from_slice(&h.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn short_buffer_is_png_header_error() {
+        for len in [0, 1, 16, 23] {
+            assert!(matches!(
+                png_dimensions(&vec![0u8; len]),
+                Err(RenderError::PngHeader)
+            ));
+        }
+    }
+
+    #[test]
+    fn valid_header_parses_dimensions() {
+        assert_eq!(png_dimensions(&header(640, 480)).unwrap(), (640, 480));
+    }
+
+    #[test]
+    fn oversized_dimensions_rejected() {
+        assert!(matches!(
+            png_dimensions(&header(MAX_WIDTH + 1, 10)),
+            Err(RenderError::ImageTooLarge)
+        ));
+        assert!(matches!(
+            png_dimensions(&header(10, MAX_HEIGHT + 1)),
+            Err(RenderError::ImageTooLarge)
+        ));
+        // Exactly at the cap is allowed.
+        assert_eq!(
+            png_dimensions(&header(MAX_WIDTH, MAX_HEIGHT)).unwrap(),
+            (MAX_WIDTH, MAX_HEIGHT)
+        );
+    }
 }
