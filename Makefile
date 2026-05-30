@@ -66,7 +66,7 @@ dist:
 run-build: build
 	./target/debug/laterm
 
-INSTALL_DIR ?= $(HOME)/bin
+INSTALL_DIR ?= $(HOME)/.local/bin
 OS := $(shell uname -s)
 install:
 	@[[ -d "$(INSTALL_DIR)" ]] || mkdir -pv "$(INSTALL_DIR)"
