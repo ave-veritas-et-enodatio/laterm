@@ -17,10 +17,19 @@ use std::path::{Path, PathBuf};
 /// Dash-mangle an absolute working-directory path into the single canonical
 /// string used for BOTH the Claude Code log-dir name and the socket filename, so
 /// the `--hook` client and the renderer's listener derive the same socket.
-/// Replaces `/`, `\`, and `:` with `-`. This is the ONE shared mangling helper —
-/// main's `project_log_dir` calls it too; do not fork it.
+///
+/// Rule: every character NOT in `[A-Za-z0-9]` maps 1:1 to `-` (no collapsing). This
+/// must track Claude Code's own project-dir naming convention byte-for-byte — e.g.
+/// `/Users/benn/projects/agent_convos/ai-race` →
+/// `-Users-benn-projects-agent-convos-ai-race` (note the `_` becomes `-`) and, on
+/// Windows, `C:\Users\benn\projects\laterm` → `C--Users-benn-projects-laterm`. If
+/// Claude Code ever diverges (e.g. unicode/edge chars), revisit this. It is the ONE
+/// shared mangling helper — main's `project_log_dir` calls it too; do not fork it.
 pub(crate) fn mangle_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace(['/', '\\', ':'], "-")
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Home directory (HOME on unix; USERPROFILE, else HOME, on Windows). Shared by
@@ -224,8 +233,14 @@ mod tests {
             mangle_dir(Path::new("/Users/benn/projects/laterm")),
             "-Users-benn-projects-laterm"
         );
-        // Windows-style drive + backslashes collapse the same way.
+        // Windows-style drive + backslashes map the same way (`:` and `\` -> `-`).
         assert_eq!(mangle_dir(Path::new(r"C:\Users\benn")), "C--Users-benn");
+        // Every non-alphanumeric char maps to `-`, including `_` — this must match
+        // Claude Code's project-dir naming (the catch-up log dir depends on it).
+        assert_eq!(
+            mangle_dir(Path::new("/Users/benn/projects/agent_convos/ai-race")),
+            "-Users-benn-projects-agent-convos-ai-race"
+        );
     }
 }
 

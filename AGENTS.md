@@ -21,7 +21,7 @@ Windows Terminal, or any Sixel-capable terminal window:
 cargo run --release
 # or, if installed on PATH:
 laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
-laterm --install-hooks [--project|--global]   # one-time: configure Claude Code
+laterm --install-hooks [--project|--project-local|--global]   # one-time: configure Claude Code
 laterm --hook <UserPromptSubmit|Stop>          # invoked BY Claude Code, not by you
 ```
 
@@ -116,10 +116,14 @@ other work:
    `UserPromptSubmit` hook's stdout is injected into the model's context). If no
    listener is present (socket missing/refused) exit 0 SILENTLY — never block or
    fail Claude Code.
-2. **`--install-hooks [--project|--global]`** (configure-and-exit) — merge the
-   two hook entries into the target `settings.json` (default `--project` →
-   `.claude/settings.json`; `--global` → `~/.claude/settings.json`) without
-   clobbering existing settings, idempotently, then exit. Each entry invokes
+2. **`--install-hooks [--project|--project-local|--global]`** (configure-and-exit) — merge the
+   two hook entries into the target `settings.json` (`--project` →
+   `.claude/settings.json` (shared/committed); `--project-local` →
+   `.claude/settings.local.json` (personal/untracked); `--global` →
+   `~/.claude/settings.json`; default `--project-local` — never touch shared
+   settings unless directed; at most one target flag, more is a usage error)
+   without clobbering existing settings
+   (a `permissions` block survives), idempotently, then exit. Each entry invokes
    `<current_exe()-abs-path> --hook <event>` so it fires regardless of PATH.
 3. **normal (the renderer)** — Parse CLI flags (`-C`/`--cwd`, `--log`,
    `--catch-up`, `--help`/`--version`). If `-C`/`--cwd <PATH>` is given,
@@ -522,13 +526,16 @@ hook re-architecture introduces no external dependency.
 
 ### Log directory derivation
 
-The log directory is `~/.claude/projects/<cwd>` where every `/`, `\`, and `:`
-in the absolute working directory path is replaced by `-`. For example,
-`/Users/benn/projects/laterm` becomes
-`~/.claude/projects/-Users-benn-projects-laterm`, and on Windows
-`C:\Users\benn\projects\laterm` becomes
+The log directory is `~/.claude/projects/<cwd>` where every non-alphanumeric
+character (anything not in `[A-Za-z0-9]`) in the absolute working directory path
+is replaced 1:1 by `-`. For example, `/Users/benn/projects/laterm` becomes
+`~/.claude/projects/-Users-benn-projects-laterm`;
+`/Users/benn/projects/agent_convos/ai-race` becomes
+`~/.claude/projects/-Users-benn-projects-agent-convos-ai-race` (note the `_`
+becomes `-`); and on Windows `C:\Users\benn\projects\laterm` becomes
 `~/.claude/projects/C--Users-benn-projects-laterm`. This is the same convention
-used by Claude Code; do not change it unilaterally.
+used by Claude Code (`ipc::mangle_dir` must track it byte-for-byte); do not change
+it unilaterally.
 
 ### Hooks must be installed for the live path
 

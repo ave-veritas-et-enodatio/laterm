@@ -47,9 +47,11 @@ const USAGE: &str = concat!(
     "  --log <PATH>          write diagnostics to PATH (default: no logging)\n",
     "  --catch-up[=<MINS>]   replay math from the last MINS minutes of completed\n",
     "                        transcript before the live path (bare flag = 5 minutes)\n",
-    "  --install-hooks [--project|--global]\n",
+    "  --install-hooks [--project|--project-local|--global]\n",
     "                        merge laterm's two hook entries into settings.json\n",
-    "                        (default --project) and exit\n",
+    "                        and exit. Default: --project-local, the personal,\n",
+    "                        untracked .claude/settings.local.json. --project\n",
+    "                        writes the shared/committed .claude/settings.json\n",
     "  --hook <event>        forward a Claude Code hook payload to the running\n",
     "                        window and exit (invoked BY Claude Code, not by you)\n",
     "  --version, -V         print version and exit\n",
@@ -62,13 +64,19 @@ struct Args {
     catch_up: Option<i64>,
 }
 
-/// Which settings.json `--install-hooks` writes: the repo-local `.claude/` or the
-/// user-global `~/.claude/`.
+/// Which settings.json `--install-hooks` writes: the repo-local tracked
+/// `.claude/settings.json`, the repo-local personal (untracked)
+/// `.claude/settings.local.json` (the default — never touch shared settings
+/// unless directed), or the user-global `~/.claude/settings.json`.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum HookTarget {
     Project,
+    ProjectLocal,
     Global,
 }
+
+/// Usage error when more than one `--install-hooks` target flag is given.
+const TARGET_CONFLICT: &str = "only one of --project, --project-local, or --global may be given";
 
 /// The outcome of parsing argv. Each variant is a distinct terminal action.
 enum Invocation {
@@ -93,6 +101,15 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut target: Option<HookTarget> = None;
     let mut it = argv.into_iter();
 
+    // Set the install target, rejecting a second/conflicting target flag.
+    let set_target = |target: &mut Option<HookTarget>, t: HookTarget| -> Result<(), String> {
+        if target.is_some() {
+            return Err(TARGET_CONFLICT.to_string());
+        }
+        *target = Some(t);
+        Ok(())
+    };
+
     while let Some(arg) = it.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(Invocation::Help);
@@ -114,9 +131,11 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
         } else if arg == "--install-hooks" {
             install = true;
         } else if arg == "--project" {
-            target = Some(HookTarget::Project);
+            set_target(&mut target, HookTarget::Project)?;
+        } else if arg == "--project-local" {
+            set_target(&mut target, HookTarget::ProjectLocal)?;
         } else if arg == "--global" {
-            target = Some(HookTarget::Global);
+            set_target(&mut target, HookTarget::Global)?;
         } else if arg == "--cwd" || arg == "-C" {
             let path = it.next().ok_or("--cwd requires a path argument")?;
             args.cwd = Some(PathBuf::from(path));
@@ -149,12 +168,16 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     }
 
     if install {
+        // Bare --install-hooks defaults to the personal, untracked slot — never
+        // touch shared/committed settings unless explicitly directed.
         return Ok(Invocation::InstallHooks(
-            target.unwrap_or(HookTarget::Project),
+            target.unwrap_or(HookTarget::ProjectLocal),
         ));
     }
     if target.is_some() {
-        return Err("--project/--global are only valid with --install-hooks".to_string());
+        return Err(
+            "--project/--project-local/--global are only valid with --install-hooks".to_string(),
+        );
     }
     Ok(Invocation::Run(args))
 }
@@ -406,6 +429,19 @@ fn entry_has_command(entry: &Value, command: &str) -> bool {
         })
 }
 
+/// The settings.json path for `target`: repo-local tracked
+/// (`.claude/settings.json`), repo-local personal/untracked
+/// (`.claude/settings.local.json`), or user-global (`~/.claude/settings.json`).
+/// The project variants are relative to the working directory; only Global uses
+/// `home`. Pure, for unit testing.
+fn settings_file(target: HookTarget, home: &Path) -> PathBuf {
+    match target {
+        HookTarget::Project => PathBuf::from(".claude").join("settings.json"),
+        HookTarget::ProjectLocal => PathBuf::from(".claude").join("settings.local.json"),
+        HookTarget::Global => home.join(".claude").join("settings.json"),
+    }
+}
+
 /// `--install-hooks`: merge the two hook entries into the target settings.json
 /// and exit. Reads any existing file (a malformed one is an error, not clobbered),
 /// merges additively + idempotently, and writes it back pretty-printed.
@@ -418,19 +454,14 @@ fn install_hooks(target: HookTarget) -> i32 {
         }
     };
 
-    let settings_path = match target {
-        HookTarget::Project => PathBuf::from(".claude").join("settings.json"),
-        HookTarget::Global => {
-            let home = match ipc::home_dir() {
-                Some(h) => h,
-                None => {
-                    eprintln!("laterm: home dir: not found");
-                    return 1;
-                }
-            };
-            home.join(".claude").join("settings.json")
+    let home = match ipc::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("laterm: home dir: not found");
+            return 1;
         }
     };
+    let settings_path = settings_file(target, &home);
 
     let existing = match std::fs::read(&settings_path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
@@ -667,13 +698,19 @@ mod tests {
 
     #[test]
     fn install_hooks_default_and_targets() {
+        // Bare --install-hooks defaults to the personal, untracked slot.
         assert!(matches!(
             parse_args(argv(&["--install-hooks"])),
-            Ok(Invocation::InstallHooks(HookTarget::Project))
+            Ok(Invocation::InstallHooks(HookTarget::ProjectLocal))
         ));
+        // Explicit --project still selects the shared/committed target.
         assert!(matches!(
             parse_args(argv(&["--install-hooks", "--project"])),
             Ok(Invocation::InstallHooks(HookTarget::Project))
+        ));
+        assert!(matches!(
+            parse_args(argv(&["--install-hooks", "--project-local"])),
+            Ok(Invocation::InstallHooks(HookTarget::ProjectLocal))
         ));
         assert!(matches!(
             parse_args(argv(&["--install-hooks", "--global"])),
@@ -681,6 +718,27 @@ mod tests {
         ));
         // A target flag without --install-hooks is an error.
         assert!(parse_args(argv(&["--global"])).is_err());
+        assert!(parse_args(argv(&["--project-local"])).is_err());
+        // More than one target flag is a usage error.
+        assert!(parse_args(argv(&["--install-hooks", "--project", "--global"])).is_err());
+        assert!(parse_args(argv(&["--install-hooks", "--project-local", "--project"])).is_err());
+    }
+
+    #[test]
+    fn settings_file_resolves_per_target() {
+        let home = PathBuf::from("/home/x");
+        assert_eq!(
+            settings_file(HookTarget::Project, &home),
+            PathBuf::from(".claude").join("settings.json")
+        );
+        assert_eq!(
+            settings_file(HookTarget::ProjectLocal, &home),
+            PathBuf::from(".claude").join("settings.local.json")
+        );
+        assert_eq!(
+            settings_file(HookTarget::Global, &home),
+            PathBuf::from("/home/x").join(".claude").join("settings.json")
+        );
     }
 
     #[test]
@@ -835,5 +893,25 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn merge_hooks_preserves_settings_local_permissions_block() {
+        // A personal .claude/settings.local.json typically carries a permissions
+        // block; merging laterm's hooks must not disturb it.
+        let exe = "/abs/laterm";
+        let existing = json!({
+            "permissions": { "allow": ["Bash(ls:*)", "Read(//tmp/**)"], "deny": ["Bash(rm:*)"] }
+        });
+        let merged = merge_hooks(existing, exe);
+
+        assert_eq!(
+            merged["permissions"]["allow"],
+            json!(["Bash(ls:*)", "Read(//tmp/**)"])
+        );
+        assert_eq!(merged["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        // laterm's hooks were still added.
+        assert!(merged["hooks"]["UserPromptSubmit"].is_array());
+        assert!(merged["hooks"]["Stop"].is_array());
     }
 }

@@ -87,13 +87,13 @@ Both markers and body tint are readable in light and dark themes.
 
 ```
 laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
-laterm --install-hooks [--project|--global]   # one-time: configure Claude Code
+laterm --install-hooks [--project|--project-local|--global]   # one-time: configure Claude Code
 laterm --hook <UserPromptSubmit|Stop>          # invoked BY Claude Code, not you
 ```
 
 | Flag | Description |
 |---|---|
-| `--install-hooks [--project\|--global]` | Write LaTerm's two hook entries into Claude Code's `settings.json` (default `--project` → `.claude/settings.json`; `--global` → `~/.claude/settings.json`), then exit. Run this once so the live path works. |
+| `--install-hooks [--project\|--project-local\|--global]` | Write LaTerm's two hook entries into Claude Code's `settings.json` (`--project` → `.claude/settings.json` (shared/committed); `--project-local` → `.claude/settings.local.json` (personal/untracked); `--global` → `~/.claude/settings.json`; default `--project-local`), then exit. At most one target flag. Run this once so the live path works. |
 | `--hook <event>` | Internal: invoked by Claude Code per turn (`UserPromptSubmit`/`Stop`). Forwards the hook's stdin JSON to the running window and exits. You do not run this yourself. |
 | `--cwd <PATH>`, `-C` | Derive the watched log directory (and rendezvous socket) from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
 | `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |

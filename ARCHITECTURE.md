@@ -190,7 +190,7 @@ modules — together with `main` they are the only modules that write to stdout.
      hook is injected into the model's context). If no listener is present
      (socket missing or connection refused) it exits 0 SILENTLY — it must never
      block or fail Claude Code. This mode is dispatched before any other work.
-  2. **`--install-hooks [--project|--global]` (configure-and-exit).** Merge the
+  2. **`--install-hooks [--project|--project-local|--global]` (configure-and-exit).** Merge the
      two hook entries (see the hook JSON below) into the appropriate
      `settings.json` without clobbering existing settings, then exit.
   3. **normal (the renderer).** Parse CLI flags (`-C`/`--cwd`, `--log`,
@@ -218,8 +218,12 @@ modules — together with `main` they are the only modules that write to stdout.
      EntryStyle (user → `USER_STYLE`, assistant → `ASSISTANT_STYLE`), and
      `feed::emit_entry` under the output mutex. Handle SIGINT/SIGTERM to stop
      the listener cleanly and remove the socket file on exit.
-- Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
-  absolute working directory path is replaced by `-`.
+- Log directory derivation: `~/.claude/projects/<cwd>` where every
+  non-alphanumeric character (anything not in `[A-Za-z0-9]`) in the absolute
+  working directory path is replaced 1:1 by `-` (e.g.
+  `/Users/benn/projects/agent_convos/ai-race` →
+  `-Users-benn-projects-agent-convos-ai-race`, the `_` becomes `-`). This must
+  track Claude Code's own convention byte-for-byte (shared via `ipc::mangle_dir`).
 - Socket path derivation: delegated to `ipc` (a single shared helper, so the
   `--hook` client and the listener always agree). Under `$XDG_RUNTIME_DIR` if
   set, else `~/.cache/laterm/`; the filename is the same dash-mangled working-
@@ -245,10 +249,14 @@ modules — together with `main` they are the only modules that write to stdout.
   }
   ```
 
-  `--project` targets `.claude/settings.json` (repo-local); `--global` targets
-  `~/.claude/settings.json`; the default when neither is given is `--project`.
-  Merge is additive and idempotent: existing top-level keys and existing hook
-  entries are preserved, and a matching laterm entry is not duplicated on re-run.
+  `--project` targets `.claude/settings.json` (repo-local, tracked);
+  `--project-local` targets `.claude/settings.local.json` (repo-local, personal/
+  untracked); `--global` targets `~/.claude/settings.json`; the default when none
+  is given is `--project-local` (never touch shared/committed settings unless
+  explicitly directed). At most one target flag may be given (more is a usage
+  error). Merge is additive and idempotent: existing top-level keys and existing
+  hook entries are preserved (e.g. a `permissions` block in a `settings.local.json`
+  survives), and a matching laterm entry is not duplicated on re-run.
 - Startup line: after the protocol is selected and the log dir is derived (and
   after any `-C` chdir), `main` writes ONE plain-color line to stdout (no SGR
   role color, no role marker): `laterm <version> monitoring <dir>/`, where
@@ -576,8 +584,8 @@ complete. Organized by component, in implementation priority order.
 - `laterm` spawns no child process. Accepted flags: `-C`/`--cwd <PATH>`,
   `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes),
   `--hook <event>` (forward-and-exit; `event` is `UserPromptSubmit` or `Stop`),
-  `--install-hooks [--project|--global]` (configure-and-exit; default
-  `--project`), `--version`/`-V`, `--help`/`-h`.
+  `--install-hooks [--project|--project-local|--global]` (configure-and-exit;
+  default `--project-local`), `--version`/`-V`, `--help`/`-h`.
   Unknown flags or a missing/empty `--log`, `--cwd`, `-C`, or `--hook` argument
   exit non-zero with a usage message to stderr. (`--hook` mode is the exception
   to stderr-on-error: a missing listener is exit 0 and silent — see below.)
@@ -648,8 +656,9 @@ complete. Organized by component, in implementation priority order.
   one assistant entry (`last_assistant_message` text) — one marker-pair each.
 - `--install-hooks` writes the two hook entries (invoking `<current-exe> --hook
   UserPromptSubmit` and `... --hook Stop`) into the target `settings.json`
-  (`--project` → `.claude/settings.json`, `--global` → `~/.claude/settings.json`,
-  default `--project`), merging without clobbering existing settings and without
+  (`--project` → `.claude/settings.json`, `--project-local` →
+  `.claude/settings.local.json`, `--global` → `~/.claude/settings.json`, default
+  `--project-local`), merging without clobbering existing settings and without
   duplicating an already-present laterm entry on re-run. It then exits.
 
 ### Catch-up historical parser (Priority 2)
