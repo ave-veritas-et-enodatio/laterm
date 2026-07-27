@@ -2,7 +2,7 @@
 // Supports the kitty graphics protocol, iTerm2 imgcat (OSC 1337), and SIXEL.
 // kitty is preferred, then imgcat, then sixel.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::sixel;
 
@@ -58,7 +58,10 @@ fn kitty_supported_env<F>(env: F) -> bool
 where
     F: Fn(&str) -> Result<String, std::env::VarError>,
 {
-    if env("KITTY_WINDOW_ID").map(|v| !v.is_empty()).unwrap_or(false) {
+    if env("KITTY_WINDOW_ID")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
         return true;
     }
     let term = env("TERM").unwrap_or_default();
@@ -110,7 +113,10 @@ fn imgcat_supported_env<F>(env: F) -> bool
 where
     F: Fn(&str) -> Result<String, std::env::VarError>,
 {
-    if env("TERM_PROGRAM").map(|v| v == "iTerm.app").unwrap_or(false) {
+    if env("TERM_PROGRAM")
+        .map(|v| v == "iTerm.app")
+        .unwrap_or(false)
+    {
         return true;
     }
     if env("LC_TERMINAL").map(|v| v == "iTerm2").unwrap_or(false) {
@@ -137,7 +143,9 @@ mod tests {
 
     // ---- kitty tests ----
 
-    fn env_map<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Result<String, std::env::VarError> + 'a {
+    fn env_map<'a>(
+        pairs: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> Result<String, std::env::VarError> + 'a {
         move |k: &str| {
             pairs
                 .iter()
@@ -174,7 +182,10 @@ mod tests {
 
     #[test]
     fn kitty_supported_iterm() {
-        assert!(!kitty_supported_env(env_map(&[("TERM_PROGRAM", "iTerm.app")])));
+        assert!(!kitty_supported_env(env_map(&[(
+            "TERM_PROGRAM",
+            "iTerm.app"
+        )])));
     }
 
     #[test]
@@ -203,7 +214,10 @@ mod tests {
         let payload: Vec<u8> = (0..CHUNK_SIZE * 2 + 17).map(|i| i as u8).collect();
         let out = kitty_encode(&payload, 1);
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,r=1,m="), "output does not start with graphics control prefix");
+        assert!(
+            s.starts_with("\x1b_Ga=T,f=100,r=1,m="),
+            "output does not start with graphics control prefix"
+        );
         assert!(s.ends_with("\x1b\\"), "output does not end with ST");
         assert!(s.contains("m=0"), "output missing final m=0 chunk");
         let decoded = decode_kitty_payload(&out);
@@ -214,14 +228,20 @@ mod tests {
     fn kitty_encode_has_row_arg() {
         let out = kitty_encode(b"hello", 3);
         let s = std::str::from_utf8(&out).unwrap();
-        assert!(s.starts_with("\x1b_Ga=T,f=100,r=3,m="), "output missing r=3 size arg: {s:?}");
+        assert!(
+            s.starts_with("\x1b_Ga=T,f=100,r=3,m="),
+            "output missing r=3 size arg: {s:?}"
+        );
     }
 
     // ---- imgcat tests ----
 
     #[test]
     fn imgcat_supported_iterm_app() {
-        assert!(imgcat_supported_env(env_map(&[("TERM_PROGRAM", "iTerm.app")])));
+        assert!(imgcat_supported_env(env_map(&[(
+            "TERM_PROGRAM",
+            "iTerm.app"
+        )])));
     }
 
     #[test]
@@ -231,7 +251,10 @@ mod tests {
 
     #[test]
     fn imgcat_supported_wezterm() {
-        assert!(imgcat_supported_env(env_map(&[("TERM_PROGRAM", "WezTerm")])));
+        assert!(imgcat_supported_env(env_map(&[(
+            "TERM_PROGRAM",
+            "WezTerm"
+        )])));
     }
 
     #[test]
@@ -248,13 +271,19 @@ mod tests {
     fn imgcat_encode_structure_and_roundtrip() {
         let input = b"fake-png-data-for-testing";
         let out = imgcat_encode(input, 3);
-        assert!(out.starts_with(b"\x1b]1337;File="), "output does not start with OSC 1337");
+        assert!(
+            out.starts_with(b"\x1b]1337;File="),
+            "output does not start with OSC 1337"
+        );
         assert_eq!(out.last(), Some(&b'\x07'), "output does not end with BEL");
 
         let size_tag = format!("size={}", input.len());
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains(&size_tag), "output missing {size_tag}");
-        assert!(s.contains("height=3;preserveAspectRatio=1;"), "output missing height/aspect args: {s:?}");
+        assert!(
+            s.contains("height=3;preserveAspectRatio=1;"),
+            "output missing height/aspect args: {s:?}"
+        );
 
         // Decode base64 after last ':' before BEL.
         let colon = s.rfind(':').expect("no ':' in output");

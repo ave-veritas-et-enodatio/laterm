@@ -1,8 +1,17 @@
 // convo: parse a single JSONL line from a Claude Code conversation log and
 // extract renderable text segments.
 
+use std::path::Path;
+
 use serde::Deserialize;
 use serde_json::Value;
+
+/// Whether `path` names a `.jsonl` conversation log. Used by catch-up's
+/// directory scan (moved here from the removed `watch` module — a pure path
+/// predicate with no laterm imports).
+pub fn is_jsonl(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+}
 
 /// One renderable prose unit from a conversation entry.
 #[derive(Debug, PartialEq)]
@@ -33,16 +42,6 @@ struct Message {
     content: Option<Value>,
 }
 
-/// Parse one JSONL line and return its text segments.
-/// Returns an empty Vec for non-user/assistant entries, entries with no text
-/// content, and any line that fails to parse.
-pub fn extract(line: &[u8]) -> Vec<Segment> {
-    match parse(line) {
-        Some(e) => e.segments,
-        None => vec![],
-    }
-}
-
 /// Parse one JSONL line into a `ParsedEntry` (timestamp + text segments).
 /// Returns None for non-user/assistant entries, entries with no text content,
 /// and any line that fails to parse.
@@ -64,7 +63,10 @@ pub fn parse(line: &[u8]) -> Option<ParsedEntry> {
             if s.is_empty() {
                 return None;
             }
-            vec![Segment { role, text: s.clone() }]
+            vec![Segment {
+                role,
+                text: s.clone(),
+            }]
         }
         Value::Array(blocks) => {
             let mut segs = Vec::new();
@@ -73,7 +75,10 @@ pub fn parse(line: &[u8]) -> Option<ParsedEntry> {
                     && let Some(text) = b.get("text").and_then(Value::as_str)
                     && !text.is_empty()
                 {
-                    segs.push(Segment { role: role.clone(), text: text.to_string() });
+                    segs.push(Segment {
+                        role: role.clone(),
+                        text: text.to_string(),
+                    });
                 }
             }
             if segs.is_empty() {
@@ -84,29 +89,57 @@ pub fn parse(line: &[u8]) -> Option<ParsedEntry> {
         _ => return None,
     };
 
-    Some(ParsedEntry { timestamp, segments })
+    Some(ParsedEntry {
+        timestamp,
+        segments,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Segments of one line, or empty for a non-user/assistant entry, empty
+    /// content, or a parse failure. A thin unwrap over `parse` used by the tests
+    /// below to assert segment extraction directly.
+    fn extract(line: &[u8]) -> Vec<Segment> {
+        parse(line).map(|e| e.segments).unwrap_or_default()
+    }
+
     #[test]
     fn assistant_array_with_text_and_non_text_blocks() {
         let line = br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal"},{"type":"text","text":"hello world"},{"type":"tool_use","id":"x","name":"fn","input":{}}]}}"#;
-        assert_eq!(extract(line), vec![Segment { role: "assistant".into(), text: "hello world".into() }]);
+        assert_eq!(
+            extract(line),
+            vec![Segment {
+                role: "assistant".into(),
+                text: "hello world".into()
+            }]
+        );
     }
 
     #[test]
     fn user_string_content() {
         let line = br#"{"type":"user","message":{"role":"user","content":"what is 2+2?"}}"#;
-        assert_eq!(extract(line), vec![Segment { role: "user".into(), text: "what is 2+2?".into() }]);
+        assert_eq!(
+            extract(line),
+            vec![Segment {
+                role: "user".into(),
+                text: "what is 2+2?".into()
+            }]
+        );
     }
 
     #[test]
     fn user_array_content() {
         let line = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"explain this"}]}}"#;
-        assert_eq!(extract(line), vec![Segment { role: "user".into(), text: "explain this".into() }]);
+        assert_eq!(
+            extract(line),
+            vec![Segment {
+                role: "user".into(),
+                text: "explain this".into()
+            }]
+        );
     }
 
     #[test]
@@ -115,8 +148,14 @@ mod tests {
         assert_eq!(
             extract(line),
             vec![
-                Segment { role: "assistant".into(), text: "first".into() },
-                Segment { role: "assistant".into(), text: "second".into() },
+                Segment {
+                    role: "assistant".into(),
+                    text: "first".into()
+                },
+                Segment {
+                    role: "assistant".into(),
+                    text: "second".into()
+                },
             ]
         );
     }
@@ -142,7 +181,13 @@ mod tests {
     #[test]
     fn role_absent_falls_back_to_top_level_type() {
         let line = br#"{"type":"user","message":{"content":"no role field"}}"#;
-        assert_eq!(extract(line), vec![Segment { role: "user".into(), text: "no role field".into() }]);
+        assert_eq!(
+            extract(line),
+            vec![Segment {
+                role: "user".into(),
+                text: "no role field".into()
+            }]
+        );
     }
 
     #[test]
@@ -162,7 +207,13 @@ mod tests {
         let line = br#"{"type":"user","timestamp":"2026-05-27T07:33:02.123Z","message":{"role":"user","content":"hi"}}"#;
         let entry = parse(line).expect("entry");
         assert_eq!(entry.timestamp.as_deref(), Some("2026-05-27T07:33:02.123Z"));
-        assert_eq!(entry.segments, vec![Segment { role: "user".into(), text: "hi".into() }]);
+        assert_eq!(
+            entry.segments,
+            vec![Segment {
+                role: "user".into(),
+                text: "hi".into()
+            }]
+        );
     }
 
     #[test]
@@ -170,5 +221,13 @@ mod tests {
         let line = br#"{"type":"user","message":{"role":"user","content":"hi"}}"#;
         let entry = parse(line).expect("entry");
         assert!(entry.timestamp.is_none());
+    }
+
+    #[test]
+    fn is_jsonl_matches_only_the_extension() {
+        assert!(is_jsonl(Path::new("/x/session.jsonl")));
+        assert!(!is_jsonl(Path::new("/x/session.json")));
+        assert!(!is_jsonl(Path::new("/x/session")));
+        assert!(!is_jsonl(Path::new("/x/jsonl")));
     }
 }

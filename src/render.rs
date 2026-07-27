@@ -2,9 +2,9 @@
 
 use std::sync::RwLock;
 
-use ratex_layout::{layout, to_display_list, LayoutOptions};
+use ratex_layout::{LayoutOptions, layout, to_display_list};
 use ratex_parser::parser::parse;
-use ratex_render::{render_to_png, RenderOptions};
+use ratex_render::{RenderOptions, render_to_png};
 use ratex_types::{color::Color, math_style::MathStyle};
 
 /// Process-global theme: glyph color and background color.
@@ -62,7 +62,11 @@ pub fn render(latex: &str, display: bool) -> Result<(Vec<u8>, u32), RenderError>
 
     let (glyph, background) = current_theme();
 
-    let style = if display { MathStyle::Display } else { MathStyle::Text };
+    let style = if display {
+        MathStyle::Display
+    } else {
+        MathStyle::Text
+    };
     let opts = LayoutOptions::default().with_style(style).with_color(glyph);
     let lbox = layout(&ast, &opts);
     let dl = to_display_list(&lbox);
