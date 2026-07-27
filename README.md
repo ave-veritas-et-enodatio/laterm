@@ -1,13 +1,13 @@
 # LaTerm
 
-A Claude Code sidecar that watches the active conversation log for the current
-project and renders LaTeX math expressions as inline images in a separate
-terminal window.
+A Claude Code sidecar that renders the active conversation's LaTeX math
+expressions as inline images in a separate terminal window.
 
 LaTerm does not wrap or intercept Claude Code. It runs alongside it: you launch
-it in its own graphics-capable terminal window, and it tails the project's
-conversation logs, echoing the conversation text with any math it contains
-rendered as inline images in place.
+it in its own graphics-capable terminal window. Once Claude Code is configured
+with LaTerm's hooks (`laterm --install-hooks`), it pushes each conversation turn
+to the window over a local socket, and LaTerm echoes the turn text with any math
+it contains rendered as inline images in place.
 
 ![screenshot](screenshot.png)
 
@@ -87,35 +87,50 @@ Both markers and body tint are readable in light and dark themes.
 
 ```
 laterm [-C <PATH>] [--log <PATH>] [--catch-up[=<MINS>]] [--version] [--help]
+laterm --install-hooks [--project|--project-local|--global]   # one-time: configure Claude Code
+laterm --hook <UserPromptSubmit|Stop>          # invoked BY Claude Code, not you
 ```
 
 | Flag | Description |
 |---|---|
-| `--cwd <PATH>`, `-C` | Derive the watched log directory from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
+| `--install-hooks [--project\|--project-local\|--global]` | Write LaTerm's two hook entries into Claude Code's `settings.json` (`--project` → `.claude/settings.json` (shared/committed); `--project-local` → `.claude/settings.local.json` (personal/untracked); `--global` → `~/.claude/settings.json`; default `--project-local`), then exit. At most one target flag. Run this once so the live path works. |
+| `--hook <event>` | Internal: invoked by Claude Code per turn (`UserPromptSubmit`/`Stop`). Forwards the hook's stdin JSON to the running window and exits. You do not run this yourself. |
+| `--cwd <PATH>`, `-C` | Derive the watched log directory (and rendezvous socket) from PATH instead of the process working directory. Both `--cwd <PATH>`/`--cwd=<PATH>` and `-C <PATH>` are accepted; a missing argument is a usage error. |
 | `--log <PATH>` | Write diagnostics to PATH. No logging unless this is given. |
-| `--catch-up[=<MINS>]` | Before tailing, replay math from the last MINS minutes of conversation history (bare flag = 5 minutes). |
+| `--catch-up[=<MINS>]` | Replay recent history before the live hook path begins. Historical-only: reads the **completed** transcript files, not a live tail (bare flag = 5 minutes). |
 | `--version`, `-V` | Print version and exit. |
 | `--help`, `-h` | Print usage and exit. |
 
 At startup laterm prints one plain-color line — `laterm <version> monitoring
-<dir>/` — naming the conversation-log directory it watches (tilde-collapsed when
-under your home directory), so the window does not look dead. If that directory
+<dir>/` — naming the project it renders for (tilde-collapsed when under your home
+directory), so the window does not look dead. If that project's log directory
 does not exist yet (Claude Code has not been started there), a second line warns
-that there is no conversation log yet; laterm keeps running and waits for it, and
-you can paste text to render in the meantime.
+that there is no conversation log yet; laterm keeps running (it still receives
+live turns via hooks, and only `--catch-up` needs the directory), and you can
+paste text to render in the meantime.
 
 ## How It Works
 
-1. From the working directory, LaTerm derives the Claude Code log directory:
-   `~/.claude/projects/<cwd with '/' replaced by '-'>`.
-2. It polls that directory (~250 ms) and tails every `*.jsonl` conversation log.
-   Tail-only: content present at startup is not replayed. Pass `--catch-up` to
-   first replay math from recent history before the tail begins.
-3. For each new entry it extracts the text from user/assistant messages and
-   scans it for LaTeX math.
+1. **One-time setup.** `laterm --install-hooks` adds two hook entries —
+   `UserPromptSubmit` and `Stop` — to Claude Code's `settings.json`, each
+   invoking `laterm --hook <event>`.
+2. **Per turn**, Claude Code runs `laterm --hook <event>`: a thin forwarder that
+   reads the hook's stdin JSON and sends it over a Unix-domain socket to the
+   running LaTerm window. The socket is chosen from the project directory named
+   in the hook payload, so a globally-installed hook reaches only the matching
+   window. If no window is listening, the forwarder exits silently — it never
+   blocks Claude Code.
+3. LaTerm extracts the turn text — your prompt from `UserPromptSubmit`, the
+   assistant's reply from `Stop` — and scans it for LaTeX math.
 4. Each expression is rendered to a PNG by the embedded RaTeX engine and emitted
    using the terminal's image protocol (kitty, imgcat, or Sixel — in that
    preference order). If rendering fails, the raw LaTeX is passed through as text.
+
+Two limitations worth knowing: the `Stop` hook delivers only the turn's **final**
+assistant text, so assistant prose written *before* a tool call within the same
+turn is not shown live (it is still visible via `--catch-up`, which reads the
+completed transcript). And the live hook path is unix-first — the Windows
+transport (a named pipe) is a planned follow-up.
 
 Output is a **full echo**: the conversation text is mirrored verbatim, with each
 math expression rendered as an image in place. Each entry is bracketed by a
@@ -169,8 +184,15 @@ panicking, so bad input degrades gracefully.
   ghostty), iTerm2 imgcat (iTerm2, WezTerm), or Sixel (Windows Terminal v1.22+,
   xterm, foot, mlterm, WezTerm, and others). Selection order: kitty → imgcat →
   Sixel. No Unicode fallback; a terminal supporting none is rejected at startup.
-- **Polling latency.** The watcher polls at ~250 ms, so a rendered expression
-  may appear up to that long after it is written.
+- **Pre-tool-call prose not shown live.** The `Stop` hook delivers only the
+  turn's final assistant text, so assistant prose written before a tool call in
+  the same turn is not rendered live; `--catch-up` on the completed transcript
+  does show it.
+- **Windows live path is a planned follow-up.** The hook transport is a
+  Unix-domain socket (unix-first); on Windows, live rendering and
+  `--install-hooks`/`--hook` are not yet available. Paste still works.
+- **Hooks must be installed.** Without `laterm --install-hooks`, Claude Code
+  pushes nothing and only `--catch-up` and manual paste render anything.
 - **Background detection is best-effort.** Glyph contrast relies on an OSC 11
   query; terminals that do not answer (within 200 ms) get a black-on-white
   fallback rather than theme-matched glyphs.

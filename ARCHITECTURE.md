@@ -1,9 +1,9 @@
 # LaTerm Architecture Design
 
-A Claude Code sidecar that watches the active conversation log for the current
-project and renders LaTeX math expressions as inline images in a separate
-graphics-capable terminal window (kitty graphics protocol, iTerm2 imgcat, or
-Sixel).
+A Claude Code sidecar that receives conversation turns for the current project
+— pushed live by Claude Code hooks over a Unix-domain socket — and renders
+LaTeX math expressions as inline images in a separate graphics-capable terminal
+window (kitty graphics protocol, iTerm2 imgcat, or Sixel).
 
 This document is the authoritative design reference.
 
@@ -35,18 +35,29 @@ blocking defect.
 
 **Data Integrity**
 
-3. **Read-only source.** laterm never writes to, modifies, or interferes with
-   the Claude Code process or its log files. Its inputs are the `*.jsonl`
-   conversation entries and its own stdin (manually pasted text);
-   it never writes back to either source.
+3. **Non-interfering source.** laterm never writes to, modifies, or interferes
+   with the Claude Code process or its transcript files. It is no longer a
+   passive observer, though: it REQUIRES Claude Code to be configured — via the
+   two hooks (see `--install-hooks`) — to push turns to it. Its live inputs are
+   hook payloads received over a Unix-domain socket plus its own stdin (manually
+   pasted text). Its historical input (`--catch-up`) reads completed `*.jsonl`
+   transcripts read-only. laterm never writes back to the transcripts or the
+   Claude Code process. (`--install-hooks` writes a `settings.json`, but that is
+   an explicit, user-invoked configuration command, not part of monitoring
+   operation — see section 2.)
 
-4. **Tail-only, no replay.** At startup, each existing `*.jsonl` file's current
-   byte size is recorded as its starting read offset. Bytes present at startup
-   are never emitted. Files that appear after startup are read from byte 0.
-   Exception: `--catch-up[=<MINS>]` replays entries whose RFC3339 `timestamp`
-   falls within the last MINS minutes (default 5), across all `*.jsonl` files,
-   in chronological order. The tailer records file offsets after catch-up
-   completes, so caught-up entries are never re-emitted.
+4. **Hook-push live turns; historical catch-up only.** Live turns are NOT
+   tailed from the transcript. Recent Claude Code (verified on v2.1.220) writes
+   the per-session `*.jsonl` transcript asynchronously — it lags in-memory state,
+   so a live tailer misses or lags the current turn. Instead, Claude Code is
+   configured with two hooks (`UserPromptSubmit`, `Stop`) that push turn text to
+   laterm over a Unix-domain socket as each turn happens. laterm renders each
+   received hook payload exactly once as it arrives; there is no live file
+   reading. Historical replay is the one file-reading path: `--catch-up[=<MINS>]`
+   reads the COMPLETED `*.jsonl` transcript(s) in the log dir and replays entries
+   whose RFC3339 `timestamp` falls within the last MINS minutes (default 5),
+   across all files, in chronological order. Catch-up is historical-only and
+   strictly distinct from the live hook path — it never touches the socket.
 
 5. **Full transcript echo.** All conversation text is echoed verbatim to
    stdout — including messages and lines with no math. Every math expression is
@@ -58,7 +69,8 @@ blocking defect.
    height ≥ 1.5× the reference X height) is a **block**: it appears on its own
    line (newline before + image + newline). A shorter expression stays **inline**
    in the text flow. Both layouts call the same `encode(png, rows)`. Each emitted
-   entry (one jsonl conversation entry, or one paste) is prefixed with a
+   entry (one hook event — a `UserPromptSubmit` prompt or a `Stop` assistant
+   message — one catch-up transcript entry, or one paste) is prefixed with a
    matched pair of bold, color-coded role markers — one per entry, not per line:
    opening `(u)> ` / closing `<(u)` (bold green) for user entries, `[a]> ` /
    `<[a]` (bold cyan) for assistant/agent entries, `{p}> ` / `<{p}` (bold
@@ -79,7 +91,15 @@ blocking defect.
    stdout is written only by `main` and the output-feed modules (`main` emits
    the plain-color startup line and the optional missing-dir warning; `feed`
    emits the markers + tinted prose + images; `input` emits paste renders, the
-   separator rule, and BEL); no other module writes stdout.
+   separator rule, and BEL); no other module writes stdout, and the `--hook`
+   forwarder process (`ipc` client) writes NOTHING to stdout at all (stdout from
+   a `UserPromptSubmit` hook is injected into the model's context). **Live echo
+   is per-hook-event:** `UserPromptSubmit` yields one user entry, `Stop` yields
+   one assistant entry. The `Stop` payload carries only the turn's FINAL
+   assistant text (`last_assistant_message`); assistant prose emitted BEFORE a
+   tool call within the same turn is not delivered and is therefore not echoed
+   (see section 5, Known Limitations). Everything about markers, tinting,
+   block-vs-inline, and proportional row sizing is unchanged.
 
 **Resilience**
 
@@ -133,11 +153,12 @@ blocking defect.
 
 ```
 src/
-  main.rs          -- wiring: derive log dir, protocol select, watch loop, signal handling
+  main.rs          -- wiring: modes (normal / --hook / --install-hooks), derive log dir + socket path, protocol select, ipc listener loop, signal handling
   feed.rs          -- output/render orchestration: markers, tinted prose, math images, RenderCtx
   input.rs         -- manual paste-only stdin: PasteParser, separator rule, BEL
-  watch.rs         -- polling tailer: *.jsonl, tail-only, partial-line buffering
-  convo.rs         -- jsonl parser: extracts text from user/assistant entries
+  ipc.rs           -- UDS transport: socket-path derivation, listener accept-loop, --hook forward client (unix now; windows named-pipe later)
+  hook.rs          -- pure hook-payload parser: UserPromptSubmit/Stop JSON -> (role, text), cwd filter
+  convo.rs         -- historical jsonl parser (catch-up only): extracts text from user/assistant entries
   mathscan.rs      -- LaTeX delimiter scanner: flat Vec<Segment>, document order
   render.rs        -- RaTeX pipeline: parse → layout → display list → PNG, theme
   graphics.rs      -- protocol selection + kitty/imgcat encoders (private fns)
@@ -155,43 +176,103 @@ modules — together with `main` they are the only modules that write to stdout.
 ### Module Responsibilities and Constraints
 
 **`main`**
-- Responsibility (wiring only): Parse CLI flags (`-C`/`--cwd`, `--log`,
-  `--catch-up`, `--help`/`--version`). If `-C`/`--cwd <PATH>` is given,
-  `set_current_dir(PATH)` **before** deriving the log dir, so the existing
-  `current_dir()`-based derivation produces the same canonical absolute path the
-  OS gives Claude Code and the dir-name mangling matches by construction (no
-  manual canonicalization). Initialize logging. Derive the Claude Code log
-  directory for the (possibly changed) working directory. Print the startup line
-  (see below). Select a graphics protocol via
-  `graphics::select` **once**, exit immediately (clear error) if none of kitty,
-  imgcat, or Sixel is supported, and wrap it in an `Arc` shared by catch-up, the
-  watch loop, and the reader thread (so the sixel DA1 probe runs exactly once).
-  Detect the terminal background via `termbg::query` and configure the renderer
-  theme (`apply_theme`). Build a `feed::RenderCtx` once — its constructor renders
-  the reference capital "X" (default 42 px if it fails) to derive the
-  block-threshold (1.5× reference) and the proportional row sizing, and carries
-  the protocol. Spawn the stdin reader thread (`input::read_input`, given the
-  `RenderCtx` and the shared output mutex). If `--catch-up` was given, replay
-  recent history (grouped by source entry) via `feed::emit_entry` before starting
-  the tailer. Start the watch loop: for each line, `convo::extract` then
-  `feed::emit_entry` under the output mutex. Handle SIGINT/SIGTERM to stop the
-  watch loop cleanly.
-- Log directory derivation: `~/.claude/projects/<cwd>` where every `/` in the
-  absolute working directory path is replaced by `-`.
+- Responsibility (wiring only). Three modes, dispatched from CLI flags:
+  1. **`--hook <event>` (forward-and-exit).** A thin forwarder: read the hook's
+     JSON from stdin, derive the socket path from the payload's `cwd` field (the
+     authoritative project dir — `hook::payload_cwd` does a minimal parse of just
+     `cwd`, then `ipc::socket_path(cwd)`), and write those raw bytes over the
+     socket to the running laterm renderer, exit 0. Deriving from the payload
+     `cwd` (not the hook process's own working directory) guarantees the client
+     and the matching renderer rendezvous on the same socket regardless of where
+     Claude Code invokes the hook from. In this mode `main` does NO protocol select, NO
+     background detection, NO rendering, NO theme, NO paste thread — it only
+     forwards. It writes NOTHING to stdout (stdout from a `UserPromptSubmit`
+     hook is injected into the model's context). If no listener is present
+     (socket missing or connection refused) it exits 0 SILENTLY — it must never
+     block or fail Claude Code. This mode is dispatched before any other work.
+  2. **`--install-hooks [--project|--project-local|--global]` (configure-and-exit).** Merge the
+     two hook entries (see the hook JSON below) into the appropriate
+     `settings.json` without clobbering existing settings, then exit.
+  3. **normal (the renderer).** Parse CLI flags (`-C`/`--cwd`, `--log`,
+     `--catch-up`, `--help`/`--version`). If `-C`/`--cwd <PATH>` is given,
+     `set_current_dir(PATH)` **before** deriving the log dir and socket path, so
+     the existing `current_dir()`-based derivation produces the same canonical
+     absolute path the OS gives Claude Code and the dir-name mangling matches by
+     construction (no manual canonicalization). Initialize logging. Derive the
+     Claude Code log directory and the socket path (both from the possibly-
+     changed working directory). Print the startup line (see below). Select a
+     graphics protocol via `graphics::select` **once**, exit immediately (clear
+     error) if none of kitty, imgcat, or Sixel is supported, and wrap it in an
+     `Arc` shared by catch-up, the listener loop, and the reader thread (so the
+     sixel DA1 probe runs exactly once). Detect the terminal background via
+     `termbg::query` and configure the renderer theme (`apply_theme`). Build a
+     `feed::RenderCtx` once — its constructor renders the reference capital "X"
+     (default 42 px if it fails) to derive the block-threshold (1.5× reference)
+     and the proportional row sizing, and carries the protocol. Spawn the stdin
+     reader thread (`input::read_input`, given the `RenderCtx` and the shared
+     output mutex). If `--catch-up` was given, replay recent history from the
+     completed transcripts (grouped by source entry) via `convo::extract` +
+     `feed::emit_entry` before starting the listener. Start the `ipc` listener
+     loop: for each received payload, `hook::parse` it, drop it if its `cwd`
+     does not match the watched cwd, map the parsed role to the `feed`
+     EntryStyle (user → `USER_STYLE`, assistant → `ASSISTANT_STYLE`), and
+     `feed::emit_entry` under the output mutex. Handle SIGINT/SIGTERM to stop
+     the listener cleanly and remove the socket file on exit.
+- Log directory derivation: `~/.claude/projects/<cwd>` where every
+  non-alphanumeric character (anything not in `[A-Za-z0-9]`) in the absolute
+  working directory path is replaced 1:1 by `-` (e.g.
+  `/Users/benn/projects/agent_convos/ai-race` →
+  `-Users-benn-projects-agent-convos-ai-race`, the `_` becomes `-`). This must
+  track Claude Code's own convention byte-for-byte (shared via `ipc::mangle_dir`).
+- Socket path derivation: delegated to `ipc` (a single shared helper, so the
+  `--hook` client and the listener always agree). Under `$XDG_RUNTIME_DIR` if
+  set, else `~/.cache/laterm/`; the filename is the same dash-mangled working-
+  directory string used for the log dir plus a `.sock` suffix. The dash-mangling
+  is a single shared helper — it must NOT be duplicated between the log-dir and
+  socket-path derivations.
+- `--install-hooks` writes, for each of `UserPromptSubmit` and `Stop`, an entry
+  invoking the current executable with `--hook <event>`. The command is the
+  absolute path from `current_exe()` (so the hook fires regardless of PATH). The
+  exact JSON written (merged additively under the top-level `hooks` key of the
+  target `settings.json`) is:
+
+  ```json
+  {
+    "hooks": {
+      "UserPromptSubmit": [
+        { "hooks": [ { "type": "command", "command": "<abs-path>/laterm --hook UserPromptSubmit" } ] }
+      ],
+      "Stop": [
+        { "hooks": [ { "type": "command", "command": "<abs-path>/laterm --hook Stop" } ] }
+      ]
+    }
+  }
+  ```
+
+  `--project` targets `.claude/settings.json` (repo-local, tracked);
+  `--project-local` targets `.claude/settings.local.json` (repo-local, personal/
+  untracked); `--global` targets `~/.claude/settings.json`; the default when none
+  is given is `--project-local` (never touch shared/committed settings unless
+  explicitly directed). At most one target flag may be given (more is a usage
+  error). Merge is additive and idempotent: existing top-level keys and existing
+  hook entries are preserved (e.g. a `permissions` block in a `settings.local.json`
+  survives), and a matching laterm entry is not duplicated on re-run.
 - Startup line: after the protocol is selected and the log dir is derived (and
   after any `-C` chdir), `main` writes ONE plain-color line to stdout (no SGR
   role color, no role marker): `laterm <version> monitoring <dir>/`, where
-  `<version>` is `CARGO_PKG_VERSION` and `<dir>` is the derived watch dir
+  `<version>` is `CARGO_PKG_VERSION` and `<dir>` is the derived project log dir
   tilde-collapsed (the home prefix — HOME on unix / USERPROFILE on windows, the
   same source `project_log_dir` uses — replaced by `~`; otherwise the absolute
   path), with a trailing `/`. The collapse is a pure helper (`display_dir`).
 - Missing-dir warning: if the derived dir does not exist at startup, `main`
   writes a second plain-color stdout line right under the startup line phrased
   as not-yet (paste still works), e.g. `  no conversation log for this directory
-  yet — paste to render, or start Claude Code here`. The watcher still waits for
-  the dir; laterm does not exit.
-- Must NOT contain: rendering, parsing, marker, or protocol logic. This is
-  wiring only.
+  yet — paste to render, or start Claude Code here`. The dir only gates
+  `--catch-up`; live rendering waits on the `ipc` listener regardless, and
+  laterm does not exit.
+- Must NOT contain: rendering, parsing, marker, protocol, or transport logic.
+  Parsing lives in `hook`/`convo`, transport in `ipc`, rendering in `feed`. This
+  is wiring only.
 
 **`feed`**
 - Responsibility: Turn conversation/paste text into the rendered stdout feed.
@@ -217,7 +298,7 @@ modules — together with `main` they are the only modules that write to stdout.
   Writes stdout under the caller-held output mutex (no inner stdout lock — the
   mutex is the cross-thread serializer).
 - Imports: `mathscan`, `render`, `graphics`, `logging`.
-- Must NOT import: `input`, `watch`, `convo`, `termbg`.
+- Must NOT import: `input`, `ipc`, `hook`, `convo`, `termbg`.
 
 **`input`**
 - Responsibility: Manual paste-only stdin handling for the viewing window.
@@ -235,28 +316,72 @@ modules — together with `main` they are the only modules that write to stdout.
   250 ms); escape sequences and control bytes are consumed silently. Typed input
   is never rendered; Ctrl-C still fires SIGINT (`ISIG` preserved). All stdout
   writes (paste render, separator rule, BEL, bracketed-paste toggles) go under
-  the shared output mutex so they don't interleave with the watch loop.
+  the shared output mutex so they don't interleave with the listener loop.
 - Imports: `feed`, `termbg`, `logging`. `input → feed` (no cycle).
 
-**`watch`**
-- Responsibility: Poll `dir` at `interval` for `*.jsonl` files (`is_jsonl(path)`
-  helper, also reused by catch-up). Tail-only semantics: existing files are
-  recorded at their current size at startup; files appearing later start at
-  offset 0. Per tick: read newly-appended bytes and split on `\n` with a
-  cursor/index advance (not a per-line buffer rebuild — the old approach was
-  O(N²) in buffer size), emitting complete lines as `Line { data: Vec<u8> }`
-  (bytes only; the unused per-line path field was removed). Only the trailing
-  partial line is copied once into the pending buffer. Handle truncation/rotation
-  by resetting to offset 0. Wait gracefully if `dir` does not yet exist. Close
-  the channel when the cancellation flag is signalled.
+**`ipc`**
+- Responsibility: The Unix-domain-socket transport. Three pieces:
+  1. **Socket-path derivation** (shared by the listener and the `--hook`
+     client, so they rendezvous deterministically): `socket_path()` returns the
+     socket path for the current working directory — under `$XDG_RUNTIME_DIR`
+     if set, else `~/.cache/laterm/`, filename = the dash-mangled working-dir
+     string (the SAME mangling `main` uses for the log dir — a single shared
+     helper, not a copy) plus `.sock`. Creates the parent directory if needed.
+  2. **Listener** (replaces `watch`'s producer role): bind a `UnixListener` at
+     the socket path — removing any stale socket file left by a prior crash
+     before binding — and run an accept loop. Each accepted connection is read
+     to EOF (one raw JSON payload per connection) and the payload is handed to
+     the main loop (channel or callback, matching `watch`'s old producer shape).
+     Connections are handled one at a time, in arrival order, so a
+     `UserPromptSubmit` is delivered before its paired `Stop`. Observes the
+     cancellation flag so SIGINT/SIGTERM breaks the loop; removes the socket
+     file on shutdown.
+  3. **`--hook` client** (the forwarder half): `send(socket_path, bytes)`
+     connects and writes the raw stdin bytes, and `forward(cwd, bytes)` wraps
+     `socket_path(cwd)` + `send`. The socket path is derived from the payload's
+     `cwd` field (parsed by `hook`, sequenced by `main` — `ipc` stays free of any
+     laterm import and does no JSON parsing), so the client reaches exactly the
+     socket the matching renderer listens on. On any connect/write failure
+     (socket missing, connection refused, listener gone) it returns quietly so
+     `main` exits 0 — never block, never fail Claude Code. Writes NOTHING to
+     stdout under any circumstance (the stdout invariant for the forwarder).
+- Platform-split like `termbg`: unix uses `std::os::unix::net` now; the Windows
+  transport (a named pipe) is a planned follow-up (see section 5) — the live
+  hook path is not yet available on Windows.
+- No dependencies on other laterm modules. Uses only the standard library (no
+  new external crate).
+
+**`hook`**
+- Responsibility: A PURE payload parser (mirrors `convo`'s old purity). Parse a
+  hook stdin JSON payload into typed structs and return the same neutral
+  `(role, text)` shape `convo::extract` returns — `role` is a neutral parser
+  enum (user / assistant), NOT `feed`'s `EntryStyle`; `main` maps role →
+  `EntryStyle`, keeping this module free of any laterm-module import. Two events:
+  - `UserPromptSubmit` → `(user, prompt)` — `prompt` is the user's message text.
+  - `Stop` → `(assistant, last_assistant_message)` — the FULL, untruncated final
+    assistant text for the turn.
+  Also exposes the `cwd` from the payload so `main` can filter (a payload whose
+  `cwd` does not match the watched working directory is dropped — a
+  boundary/contract check against a globally-installed hook firing for another
+  project). `parse(bytes, watched_cwd)` takes the renderer's watched cwd and
+  drops on mismatch; a separate `payload_cwd(bytes)` does a minimal parse of just
+  the `cwd` for the `--hook` forwarder's socket-path derivation (no event/content
+  validation — the client forwards raw bytes regardless). Returns None/empty for
+  an unrecognized event, empty content, a `cwd` mismatch, or parse failure.
+  Never panics.
+- Uses `serde` (derive) and `serde_json`.
 - No dependencies on other laterm modules.
 
-**`convo`**
-- Responsibility: Parse one complete jsonl line. Extract text content from
+**`convo`** (catch-up historical path only)
+- Responsibility: Parse one complete jsonl line from a COMPLETED transcript for
+  `--catch-up`. This is the only surviving jsonl-parsing path — the live path is
+  hooks, so `convo` is no longer on it. Extract text content from
   `message.content` for entries whose top-level `type` is `"user"` or
   `"assistant"`. Content may be a JSON array of blocks (return `type:"text"`
   blocks only) or a plain JSON string. Return empty/None for any other entry
-  type, empty content, or parse failure. Never panic.
+  type, empty content, or parse failure. Never panic. Owns the `is_jsonl(path)`
+  file-membership helper used by catch-up's directory scan (it moved here from
+  the deleted `watch` module — a pure path predicate, no laterm imports).
 - Uses `serde_json` for parsing.
 - No dependencies on other laterm modules.
 
@@ -286,7 +411,7 @@ modules — together with `main` they are the only modules that write to stdout.
   transparent). Returns the PNG bytes and the rendered image height in pixels
   (used by the caller to choose inline vs block layout).
 - Imports: `ratex-parser`, `ratex-layout`, `ratex-render`, `ratex-types`.
-- Must NOT import: `watch`, `convo`, `mathscan`, `graphics`, `feed`, `input`.
+- Must NOT import: `ipc`, `hook`, `convo`, `mathscan`, `graphics`, `feed`, `input`.
 
 **`graphics`**
 - Responsibility: Select the terminal image protocol. Tries kitty first
@@ -305,7 +430,7 @@ modules — together with `main` they are the only modules that write to stdout.
     `imgcat_encode(png, rows)` emits
     `ESC ] 1337 ; File=inline=1;height=<rows>;preserveAspectRatio=1;size=<len>:<base64> BEL`.
 - Uses `base64` crate; imports `sixel`.
-- Must NOT import: `render`, `mathscan`, `convo`, `watch`, `feed`, `input`.
+- Must NOT import: `render`, `mathscan`, `convo`, `ipc`, `hook`, `feed`, `input`.
 
 **`imgcat` and `kitty`** — not standalone modules; see the private encoders in
 `graphics` above.
@@ -393,6 +518,9 @@ modules — together with `main` they are the only modules that write to stdout.
 ```
 main
   |
+  +---> ipc                   (UDS transport: listener producer + --hook client; std only)
+  +---> hook                  (pure payload parser -> (role, text); serde_json)
+  +---> convo                 (catch-up historical jsonl parse; serde_json)
   +---> feed ----> mathscan
   |          \---> render    (ratex-parser, ratex-layout, ratex-render, ratex-types)
   |          \---> graphics  (base64; kitty/imgcat encoders are private fns here)
@@ -400,8 +528,6 @@ main
   |          \---> logging
   +---> input ---> feed
   |          \---> termbg
-  +---> watch
-  +---> convo
   +---> termbg
   +---> logging
 
@@ -410,13 +536,16 @@ main
 
 Dependency direction is strictly downward. The only inter-feed edge is
 `input → feed`; `feed` does not depend on `input`, so there is no cycle.
-`watch`, `convo`, and `mathscan` depend only on the standard library; they do not
-import any other laterm module. `feed` orchestrates `mathscan`/`render`/
-`graphics`; `input` reads stdin via `termbg` and renders via `feed`. `termbg`
-uses `libc` (unix) or `windows-sys` (Windows) for raw-mode terminal I/O. `render`
-is the only module that imports the RaTeX crates. `main` uses the `ctrlc` crate
-for cross-platform signal handling (SIGINT/SIGTERM) and selects a protocol via
-`graphics::select` exactly once.
+`ipc`, `hook`, `convo`, and `mathscan` depend only on the standard library
+(`hook`/`convo` also use `serde_json`); they do not import any other laterm
+module. `ipc` is transport-only and `hook` is parse-only: they do not import
+each other — `main` drives the sequence (`ipc` yields a raw payload → `hook`
+parses it → `main` maps role to `feed`'s `EntryStyle` → `feed` renders). `feed`
+orchestrates `mathscan`/`render`/`graphics`; `input` reads stdin via `termbg`
+and renders via `feed`. `termbg` uses `libc` (unix) or `windows-sys` (Windows)
+for raw-mode terminal I/O. `render` is the only module that imports the RaTeX
+crates. `main` uses the `ctrlc` crate for cross-platform signal handling
+(SIGINT/SIGTERM) and selects a protocol via `graphics::select` exactly once.
 
 ### Dependency Justification
 
@@ -426,14 +555,19 @@ for cross-platform signal handling (SIGINT/SIGTERM) and selects a protocol via
 | `ratex-layout` v0.1.9 | `render` | TeX box-model layout engine for the RaTeX pipeline |
 | `ratex-render` v0.1.9 (`embed-fonts`) | `render` | PNG renderer; `embed-fonts` bundles KaTeX fonts into the binary, eliminating external font dependencies |
 | `ratex-types` v0.1.9 | `render` | Shared type definitions required to wire the RaTeX pipeline stages |
-| `serde` v1 | `convo` | Derive macros for JSON deserialization |
-| `serde_json` v1 | `convo` | Parsing `.jsonl` conversation log entries |
+| `serde` v1 | `convo`, `hook` | Derive macros for JSON deserialization |
+| `serde_json` v1 | `convo`, `hook`, `main` | Parsing `.jsonl` transcript entries (`convo`), hook payloads (`hook`), and reading/merging `settings.json` for `--install-hooks` (`main`) |
 | `base64` v0.22 | `graphics` | Encoding PNG bytes for kitty and imgcat image protocols |
 | `png` v0.17 | `sixel` | PNG→RGBA8 decode for the Sixel encoder; no sixel or quantization crate is used — the encoder is in-house |
 | `chrono` v0.4 | `main` | RFC3339 timestamp parsing for `--catch-up` window filtering |
 | `ctrlc` v3 | `main` | Cross-platform SIGINT/SIGTERM handler (MIT/Apache-2.0) |
 | `libc` v0.2 | `termbg` (unix only, `[target.'cfg(unix)']`); `logging` (unix only) | termios raw mode + `select(2)` for OSC 11 background query; `ioctl(TIOCGWINSZ)` for terminal width; `flock(LOCK_EX \| LOCK_NB)` for the exclusive log-file writer lock |
 | `windows-sys` v0.59 | `termbg`, `logging` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`, `WriteConsoleA`) for OSC 11 / DA1 / cell-size queries; `GetConsoleScreenBufferInfo` for terminal width; `INVALID_HANDLE_VALUE` for handle validation; `FILE_SHARE_READ` (feature `Win32_Storage_FileSystem`) for the log-file share mode |
+
+The `ipc` UDS transport (listener + `--hook` client) adds NO external crate: it
+uses `std::os::unix::net::{UnixListener, UnixStream}`. The Windows named-pipe
+follow-up is expected to reuse `windows-sys`, already present. No new dependency
+is introduced by the hook re-architecture.
 
 No other external dependencies are permitted without updating this table and
 providing justification.
@@ -448,14 +582,18 @@ complete. Organized by component, in implementation priority order.
 ### Sidecar startup (Priority 1)
 
 - `laterm` spawns no child process. Accepted flags: `-C`/`--cwd <PATH>`,
-  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes), `--version`/`-V`,
-  `--help`/`-h`.
-  Unknown flags or a missing/empty `--log`, `--cwd`, or `-C` argument exit
-  non-zero with a usage message to stderr.
-- `-C`/`--cwd <PATH>` sets the working directory used to derive the watched log
-  dir, via `set_current_dir(PATH)` before dir derivation (footgun-free: the
-  existing derivation then mangles the OS-canonical absolute path). A
-  `set_current_dir` failure prints an error to stderr and exits non-zero.
+  `--log <PATH>`, `--catch-up[=<MINS>]` (bare = 5 minutes),
+  `--hook <event>` (forward-and-exit; `event` is `UserPromptSubmit` or `Stop`),
+  `--install-hooks [--project|--project-local|--global]` (configure-and-exit;
+  default `--project-local`), `--version`/`-V`, `--help`/`-h`.
+  Unknown flags or a missing/empty `--log`, `--cwd`, `-C`, or `--hook` argument
+  exit non-zero with a usage message to stderr. (`--hook` mode is the exception
+  to stderr-on-error: a missing listener is exit 0 and silent — see below.)
+- `-C`/`--cwd <PATH>` sets the working directory used to derive both the watched
+  log dir and the socket path, via `set_current_dir(PATH)` before derivation
+  (footgun-free: the existing derivation then mangles the OS-canonical absolute
+  path). A `set_current_dir` failure prints an error to stderr and exits
+  non-zero.
 - After protocol selection and dir derivation, `main` prints one plain-color
   stdout line `laterm <version> monitoring <dir>/` (`<dir>` tilde-collapsed
   under home, trailing `/`). If the derived dir does not exist, a second
@@ -472,8 +610,10 @@ complete. Organized by component, in implementation priority order.
 - If `std::env::current_dir()` fails, laterm prints an error to stderr and
   exits non-zero.
 - If the derived log directory does not yet exist, laterm prints the missing-dir
-  warning line and waits (polling continues) rather than exiting.
-- SIGINT and SIGTERM stop the poll loop and cause laterm to exit 0.
+  warning line and keeps running (the `ipc` listener still accepts hook
+  payloads; only `--catch-up` needs the dir) rather than exiting.
+- SIGINT and SIGTERM stop the `ipc` listener loop, remove the socket file, and
+  cause laterm to exit 0.
 - Manual input: stdin is placed in raw mode via `termbg::raw_input()` (echo
   OFF, canonical mode OFF, `ISIG` preserved). Bracketed paste is enabled
   (`ESC[?2004h`) at startup and disabled (`ESC[?2004l`) on exit. Text pasted
@@ -496,20 +636,46 @@ complete. Organized by component, in implementation priority order.
   consumed silently. There is no bare-expression rendering for undelimited typed
   input — that behavior is removed.
 
-### File watcher (Priority 1)
+### Live hook transport (Priority 1)
 
-- Bytes present in `*.jsonl` files at startup are not emitted.
-- New bytes appended after startup are emitted as complete `\n`-terminated lines.
-- A file appearing after startup is read from byte 0.
-- A file that shrinks (truncation/rotation) is re-read from byte 0.
-- A partial line (no trailing `\n`) is buffered and emitted once completed.
-- The channel/iterator is closed when cancellation is signalled.
+- The `--hook <event>` client and the renderer's listener derive the SAME socket
+  path from the same working directory (socket rendezvous): the client connects
+  to exactly the socket the matching renderer is listening on.
+- A `--hook <event>` invocation reads its stdin JSON and forwards the raw bytes
+  over the socket, then exits 0. It writes NOTHING to stdout under any condition
+  (verified for `UserPromptSubmit`, whose stdout would be injected into the
+  model's context).
+- If no listener is present (socket missing, or connection refused), the
+  `--hook` client exits 0 silently — it never blocks and never fails Claude Code.
+- The renderer's listener binds its socket path (removing a stale socket file
+  first if present), accepts connections one at a time in arrival order, reads
+  each payload to EOF, and renders it; the socket file is removed on shutdown.
+- A received payload whose `cwd` does not match the renderer's watched working
+  directory is dropped (a globally-installed hook renders only matching turns).
+- `UserPromptSubmit` produces one user entry (`prompt` text); `Stop` produces
+  one assistant entry (`last_assistant_message` text) — one marker-pair each.
+- `--install-hooks` writes the two hook entries (invoking `<current-exe> --hook
+  UserPromptSubmit` and `... --hook Stop`) into the target `settings.json`
+  (`--project` → `.claude/settings.json`, `--project-local` →
+  `.claude/settings.local.json`, `--global` → `~/.claude/settings.json`, default
+  `--project-local`), merging without clobbering existing settings and without
+  duplicating an already-present laterm entry on re-run. It then exits.
 
-### Conversation parser (Priority 2)
+### Catch-up historical parser (Priority 2)
+
+The catch-up path (only) parses completed `*.jsonl` transcript lines via `convo`:
 
 - Entries with `type` other than `"user"` or `"assistant"` return None/empty.
 - `message.content` as a JSON array: only `type:"text"` blocks are returned.
 - `message.content` as a plain JSON string: returned as a single segment.
+- Malformed JSON returns None/empty without panicking.
+
+### Hook payload parser (Priority 2)
+
+- A `UserPromptSubmit` payload parses to `(user, prompt)`; a `Stop` payload
+  parses to `(assistant, last_assistant_message)` (full, untruncated).
+- An unrecognized `hook_event_name`, empty content, or a `cwd` that does not
+  match the watched directory yields None/empty (the payload is dropped).
 - Malformed JSON returns None/empty without panicking.
 
 ### Math scanner (Priority 2)
@@ -576,11 +742,14 @@ complete. Organized by component, in implementation priority order.
   logging is disabled for the run.
 - Log level is configurable via `LATERM_LOG_LEVEL` (debug, info, warn, error)
   when logging is enabled.
-- `--catch-up[=<MINS>]`: before the tail starts, all `*.jsonl` files in the
-  log directory are scanned; entries whose RFC3339 `timestamp` is at or after
+- `--catch-up[=<MINS>]` (historical-only, distinct from the live hook path):
+  before the `ipc` listener starts, all completed `*.jsonl` files in the log
+  directory are scanned; entries whose RFC3339 `timestamp` is at or after
   `now - MINS minutes` are collected, sorted by timestamp, and rendered in
-  order. The tailer then records file offsets, so no caught-up entry is
-  re-emitted. Absent or unparseable timestamps are excluded.
+  order. Catch-up reads files read-only and never touches the socket. Absent or
+  unparseable timestamps are excluded. (Because live turns arrive by hook, not
+  by tailing, there is no file-offset bookkeeping and no double-emit risk between
+  catch-up and the live path.)
 - `make release` (or `cargo build --release`) produces a self-contained binary
   with fonts embedded. `make dist` builds release binaries for all three
   release targets into `dist/`.
@@ -591,20 +760,32 @@ complete. Organized by component, in implementation priority order.
 ## 4. Data Flow Summary
 
 ```
-Claude Code process
+Claude Code process (per turn)
   |
-  | appends entries to ~/.claude/projects/<cwd>/.../*.jsonl
+  | UserPromptSubmit / Stop hook fires:  laterm --hook <event>
+  |   (stdin = hook JSON; command installed via --install-hooks)
   v
 
-[watch: poll ~250ms]
-  |
-  | one complete jsonl entry per line
+[ipc --hook client]  cwd = payload.cwd (hook::payload_cwd); connect
+  |                    socket_path(cwd); write raw stdin bytes; exit 0
+  |                    (no listener -> exit 0 silently, nothing to stdout)
+  | raw JSON payload over the Unix-domain socket
   v
 
-[convo::extract]
+[ipc listener accept-loop]  (renderer process; replaces the old watch producer)
   |
-  | text content from user/assistant entries
-  | (None for other entry types, empty content, parse failure)
+  | one raw hook payload per connection
+  v
+
+[hook::parse]
+  |
+  | (role, text): UserPromptSubmit -> (user, prompt)
+  |               Stop             -> (assistant, last_assistant_message)
+  | drop if cwd != watched cwd, or unrecognized event / empty / parse failure
+  v
+
+[main maps role -> feed EntryStyle: user->USER_STYLE, assistant->ASSISTANT_STYLE]
+  |
   v
 
 [feed::emit_entry(style, texts, &RenderCtx)]   (under the shared output mutex)
@@ -639,9 +820,10 @@ per entry (one marker-pair, not per line):
             bold close marker (inline, or own-line if image-final) +
             color reset + trailing blank line
 
-catch-up: same path — each replayed jsonl entry's segments are grouped and
-          emitted with a single feed::emit_entry call, so framing is
-          byte-identical to the live tail (one marker-pair per entry).
+catch-up (historical, no socket): reads completed *.jsonl files via
+          convo::extract; each replayed entry's segments are grouped and emitted
+          with a single feed::emit_entry call, so framing is byte-identical to
+          the live hook path (one marker-pair per entry).
 manual paste (input thread): same feed::emit_entry path, PASTE_STYLE marker.
 ```
 
@@ -660,8 +842,25 @@ manual paste (input thread): same feed::emit_entry path, PASTE_STYLE marker.
   background query; terminals that do not answer (within 200 ms) get the
   black-on-white fallback rather than theme-matched glyphs.
 
-- **Polling, not inotify.** The watcher uses a ~250 ms polling interval. Math in
-  a conversation entry may appear up to that long after it is written.
+- **Pre-tool-call assistant prose is not rendered (live path).** The `Stop`
+  hook delivers only the turn's FINAL assistant text (`last_assistant_message`).
+  Assistant prose emitted BEFORE a tool call within the same turn is not
+  delivered by the hook and is therefore not echoed live. This is an accepted
+  fidelity trade: the rejected alternative (OTEL log events) truncates content
+  at 60 KB by default — a dealbreaker for long, math-dense answers — and requires
+  a heavyweight OTLP receiver. `--catch-up` on the completed transcript does see
+  the full turn, including pre-tool-call prose.
+
+- **Windows live-hook path not yet available.** The `ipc` transport is a Unix-
+  domain socket (unix-first). The Windows transport (a named pipe) is a planned
+  follow-up; until it lands, `--hook`/`--install-hooks` and live rendering are
+  unix-only on Windows. Paste and (Windows) graphics detection are unaffected.
+
+- **A hook with no running renderer is silently a no-op.** If Claude Code fires
+  a hook but no laterm renderer is listening on the derived socket, the `--hook`
+  client exits 0 and renders nothing — by design, so it never blocks or fails
+  Claude Code. Turns emitted while laterm is not running are simply not shown
+  live (they remain visible to `--catch-up` afterward).
 
 - **Sixel does not scale to terminal cell size.** kitty and imgcat use the
   proportional `rows` value to adapt image height to the terminal's cell

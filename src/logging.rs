@@ -14,8 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Debug = 0,
-    Info  = 1,
-    Warn  = 2,
+    Info = 1,
+    Warn = 2,
     Error = 3,
 }
 
@@ -23,15 +23,15 @@ impl Level {
     fn as_str(self) -> &'static str {
         match self {
             Level::Debug => "DEBUG",
-            Level::Info  => "INFO",
-            Level::Warn  => "WARN",
+            Level::Info => "INFO",
+            Level::Warn => "WARN",
             Level::Error => "ERROR",
         }
     }
 }
 
 struct Logger {
-    file:      Mutex<std::fs::File>,
+    file: Mutex<std::fs::File>,
     min_level: Level,
 }
 
@@ -45,9 +45,9 @@ pub fn level_from_env() -> Level {
         .as_str()
     {
         "debug" => Level::Debug,
-        "warn"  => Level::Warn,
+        "warn" => Level::Warn,
         "error" => Level::Error,
-        _       => Level::Info,
+        _ => Level::Info,
     }
 }
 
@@ -56,7 +56,10 @@ pub fn level_from_env() -> Level {
 pub fn init(path: &Path, min_level: Level) {
     match open_log_file(path) {
         Ok(f) => {
-            let _ = LOGGER.set(Logger { file: Mutex::new(f), min_level });
+            let _ = LOGGER.set(Logger {
+                file: Mutex::new(f),
+                min_level,
+            });
         }
         Err(e) => {
             eprintln!("laterm: could not open log file {}: {e}", path.display());
@@ -131,11 +134,19 @@ pub fn log(level: Level, msg: &str) {
 
 // Full level set; `debug`/`error` round out the API and may be unused today.
 #[allow(dead_code)]
-pub fn debug(msg: &str) { log(Level::Debug, msg); }
-pub fn info(msg: &str)  { log(Level::Info,  msg); }
-pub fn warn(msg: &str)  { log(Level::Warn,  msg); }
+pub fn debug(msg: &str) {
+    log(Level::Debug, msg);
+}
+pub fn info(msg: &str) {
+    log(Level::Info, msg);
+}
+pub fn warn(msg: &str) {
+    log(Level::Warn, msg);
+}
 #[allow(dead_code)]
-pub fn error(msg: &str) { log(Level::Error, msg); }
+pub fn error(msg: &str) {
+    log(Level::Error, msg);
+}
 
 #[cfg(all(test, unix))]
 mod tests {

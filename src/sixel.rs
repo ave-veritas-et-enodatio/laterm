@@ -36,7 +36,10 @@ static CELL_HEIGHT_PX: AtomicU32 = AtomicU32::new(0);
 /// Set the background color for alpha compositing. Call once at startup after
 /// detecting the terminal background. Only used when sixel is the active protocol.
 pub fn set_background(r: u8, g: u8, b: u8) {
-    BG_RGB.store(((r as u32) << 16) | ((g as u32) << 8) | (b as u32), Ordering::Relaxed);
+    BG_RGB.store(
+        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+        Ordering::Relaxed,
+    );
 }
 
 fn bg_color() -> (u8, u8, u8) {
@@ -60,7 +63,9 @@ fn query_cell_height(timeout: Duration) -> Option<u32> {
 /// Parse a `\x1b[16t` reply (`\x1b[6;<height>;<width>t`) into the cell height in
 /// pixels. Tolerates a missing ESC[ prefix and requires a positive height.
 fn parse_cell_height(reply: &str) -> Option<u32> {
-    let body = reply.strip_prefix("\x1b[6;").or_else(|| reply.strip_prefix("[6;"))?;
+    let body = reply
+        .strip_prefix("\x1b[6;")
+        .or_else(|| reply.strip_prefix("[6;"))?;
     let semi = body.find(';')?;
     body[..semi].parse::<u32>().ok().filter(|&h| h > 0)
 }
@@ -71,7 +76,11 @@ fn pad_to(height: usize) -> usize {
     let cell = CELL_HEIGHT_PX.load(Ordering::Relaxed) as usize;
     // Pad to multiples of the sixel band. If cell height is known, also pad to
     // multiples of cell height so Windows Terminal fills no extra dark cells.
-    let quantum = if cell > 0 { lcm(SIXEL_BAND, cell) } else { SIXEL_BAND };
+    let quantum = if cell > 0 {
+        lcm(SIXEL_BAND, cell)
+    } else {
+        SIXEL_BAND
+    };
     let r = height % quantum;
     if r == 0 { height } else { height + quantum - r }
 }
@@ -81,7 +90,9 @@ fn lcm(a: usize, b: usize) -> usize {
 }
 
 fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 { (a, b) = (b, a % b); }
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
     a
 }
 
@@ -189,9 +200,7 @@ fn encode_rgba(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
     // Color registers, RGB on a 0..=COLOR_SCALE scale (rounded).
     for (i, &(r, g, b)) in palette.iter().enumerate() {
         let scale = |c: u8| (c as u32 * COLOR_SCALE + 127) / 255;
-        out.extend_from_slice(
-            format!("#{i};2;{};{};{}", scale(r), scale(g), scale(b)).as_bytes(),
-        );
+        out.extend_from_slice(format!("#{i};2;{};{};{}", scale(r), scale(g), scale(b)).as_bytes());
     }
 
     let bands = height.div_ceil(SIXEL_BAND);
@@ -329,7 +338,10 @@ mod tests {
     fn encode_smoke() {
         let png = tiny_png();
         let sixel = encode(&png, 1);
-        assert!(sixel.starts_with(b"\x1bP"), "sixel must start with DCS introducer");
+        assert!(
+            sixel.starts_with(b"\x1bP"),
+            "sixel must start with DCS introducer"
+        );
         assert!(sixel.ends_with(b"\x1b\\"), "sixel must end with ST");
     }
 
@@ -340,9 +352,15 @@ mod tests {
             255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255,
         ];
         let sixel = encode_rgba(&pixels, 2, 2);
-        assert!(sixel.starts_with(b"\x1bP"), "must start with DCS introducer");
+        assert!(
+            sixel.starts_with(b"\x1bP"),
+            "must start with DCS introducer"
+        );
         assert!(sixel.ends_with(b"\x1b\\"), "must end with ST");
-        assert!(contains(&sixel, b"\"1;1;2;2"), "must carry 1:1 raster attrs");
+        assert!(
+            contains(&sixel, b"\"1;1;2;2"),
+            "must carry 1:1 raster attrs"
+        );
         assert!(contains(&sixel, b"#0;2;"), "must define color register 0");
     }
 
@@ -365,7 +383,11 @@ mod tests {
         // With cell height unknown (the default), the quantum is the sixel band
         // (6). These cases avoid mutating the shared CELL_HEIGHT_PX atomic so
         // they stay independent of any concurrently-running encode test.
-        assert_eq!(CELL_HEIGHT_PX.load(Ordering::Relaxed), 0, "test assumes default cell height");
+        assert_eq!(
+            CELL_HEIGHT_PX.load(Ordering::Relaxed),
+            0,
+            "test assumes default cell height"
+        );
         assert_eq!(pad_to(12), 12); // exact multiple of 6
         assert_eq!(pad_to(13), 18); // one over → next band
         assert_eq!(pad_to(7), 12); // one over the first band

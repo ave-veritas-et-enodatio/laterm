@@ -132,7 +132,7 @@ mod platform {
     /// the prior termios on drop. Panic-safe: the restore runs during unwind,
     /// so a panic in the I/O between enable and drop can't strand the tty raw.
     struct RawModeGuard {
-        fd:  RawFd,
+        fd: RawFd,
         old: libc::termios,
     }
 
@@ -173,7 +173,7 @@ mod platform {
         // the caller's buffer via a valid pointer+len pair.
         unsafe {
             let mut tv = libc::timeval {
-                tv_sec:  timeout.as_secs() as libc::time_t,
+                tv_sec: timeout.as_secs() as libc::time_t,
                 tv_usec: timeout.subsec_micros() as libc::suseconds_t,
             };
             let mut readfds: libc::fd_set = std::mem::zeroed();
@@ -199,7 +199,7 @@ mod platform {
     /// ISIG (so Ctrl-C still raises SIGINT for the ctrlc handler). VMIN=0 /
     /// VTIME=1 make reads return periodically so the loop can poll shutdown.
     pub struct RawInput {
-        fd:  RawFd,
+        fd: RawFd,
         old: libc::termios,
     }
 
@@ -241,7 +241,7 @@ mod platform {
             // caller's valid pointer+len pair.
             unsafe {
                 let mut tv = libc::timeval {
-                    tv_sec:  timeout.as_secs() as libc::time_t,
+                    tv_sec: timeout.as_secs() as libc::time_t,
                     tv_usec: timeout.subsec_micros() as libc::suseconds_t,
                 };
                 let mut readfds: libc::fd_set = std::mem::zeroed();
@@ -299,10 +299,10 @@ mod platform {
 
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
-        GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleA, SetConsoleMode,
-        WriteConsoleA, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
-        ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
+        GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleA, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetConsoleMode, WriteConsoleA,
     };
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
@@ -331,7 +331,7 @@ mod platform {
     // are a handful of bytes). The input mode is always restored before return.
     unsafe fn do_query(request: &[u8]) -> Option<String> {
         let conin: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        let hout:  HANDLE = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        let hout: HANDLE = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
 
         if handle_invalid(conin) || handle_invalid(hout) {
             return None;
@@ -340,9 +340,7 @@ mod platform {
         // Ensure output handle has VT processing enabled.
         let mut out_mode: u32 = 0;
         if unsafe { GetConsoleMode(hout, &mut out_mode) } != 0 {
-            let _ = unsafe {
-                SetConsoleMode(hout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
-            };
+            let _ = unsafe { SetConsoleMode(hout, out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
         }
 
         // Require a real console input handle; pipes (MINGW64 stdin) fail here.
@@ -390,7 +388,9 @@ mod platform {
             if ok == 0 || chars_read == 0 {
                 return None;
             }
-            std::str::from_utf8(&buf[..chars_read as usize]).ok().map(str::to_string)
+            std::str::from_utf8(&buf[..chars_read as usize])
+                .ok()
+                .map(str::to_string)
         })();
 
         unsafe { SetConsoleMode(conin, old_mode) };
@@ -402,7 +402,7 @@ mod platform {
     /// paste VT sequences arrive). Output mode is left untouched. Restores the
     /// previous input mode on drop.
     pub struct RawInput {
-        conin:    HANDLE,
+        conin: HANDLE,
         old_mode: u32,
     }
 
@@ -496,22 +496,34 @@ mod tests {
 
     #[test]
     fn parse_osc11_16bit_bel() {
-        assert_eq!(parse_osc11("\x1b]11;rgb:2e2e/3434/3636\x07"), Some((0x2e, 0x34, 0x36)));
+        assert_eq!(
+            parse_osc11("\x1b]11;rgb:2e2e/3434/3636\x07"),
+            Some((0x2e, 0x34, 0x36))
+        );
     }
 
     #[test]
     fn parse_osc11_16bit_st() {
-        assert_eq!(parse_osc11("\x1b]11;rgb:ffff/ffff/ffff\x1b\\"), Some((0xff, 0xff, 0xff)));
+        assert_eq!(
+            parse_osc11("\x1b]11;rgb:ffff/ffff/ffff\x1b\\"),
+            Some((0xff, 0xff, 0xff))
+        );
     }
 
     #[test]
     fn parse_osc11_black() {
-        assert_eq!(parse_osc11("\x1b]11;rgb:0000/0000/0000\x07"), Some((0, 0, 0)));
+        assert_eq!(
+            parse_osc11("\x1b]11;rgb:0000/0000/0000\x07"),
+            Some((0, 0, 0))
+        );
     }
 
     #[test]
     fn parse_osc11_8bit_components() {
-        assert_eq!(parse_osc11("\x1b]11;rgb:2e/34/36\x07"), Some((0x2e, 0x34, 0x36)));
+        assert_eq!(
+            parse_osc11("\x1b]11;rgb:2e/34/36\x07"),
+            Some((0x2e, 0x34, 0x36))
+        );
     }
 
     #[test]

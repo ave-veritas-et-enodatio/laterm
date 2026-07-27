@@ -17,3 +17,7 @@ While planning, read the primary sources the plan depends on — actual current 
 
 ## Build & validation
 - Never `go build` or `go test` or any other go commands directly. Use the appropriate make target for the task e.g. `make build` or `make test`.
+
+## Coding
+- Use coder agents for coding work unless directed otherwise. Ensure coder agents receive AGENTS.md to understand full contract when working.
+- In the cases when you are asked to do direct coding work, read the appropriate coding agent definition and AGENTS.md if it is not fresh in context. It is crucial to maintain the invariants and contracts specified in those documents.

@@ -1,45 +1,59 @@
-// laterm — Claude Code sidecar that renders LaTeX math from the conversation
-// log as inline terminal images. (Rust implementation; the validated Go
-// prototype lives in prototype/.)
+// laterm — Claude Code sidecar that renders LaTeX math from the conversation as
+// inline terminal images. Live turns arrive over a Unix-domain socket, pushed by
+// Claude Code hooks (see `--install-hooks` / `--hook`); `--catch-up` replays the
+// completed transcript. (Rust implementation; the validated Go prototype lives in
+// prototype/.)
 
 mod convo;
 mod feed;
 mod graphics;
+mod hook;
 mod input;
+mod ipc;
 mod logging;
 mod mathscan;
 mod render;
 mod sixel;
 mod termbg;
-mod watch;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ratex_types::color::Color;
+use serde_json::{Value, json};
 
 use feed::RenderCtx;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
 const DEFAULT_CATCH_UP_MINUTES: i64 = 5;
 
 const USAGE: &str = concat!(
-    "laterm ", env!("CARGO_PKG_VERSION"), "\n",
+    "laterm ",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
     "\n",
     "usage: laterm [options]\n",
     "\n",
-    "Renders LaTeX math from the current Claude Code conversation log as inline\n",
-    "terminal images.\n",
+    "Renders LaTeX math from the current Claude Code conversation as inline\n",
+    "terminal images. Live turns are pushed by Claude Code hooks over a\n",
+    "Unix-domain socket; run --install-hooks once to configure them.\n",
     "\n",
     "options:\n",
-    "  --cwd <PATH>, -C      derive the watched log dir from PATH instead of the\n",
-    "                        current working directory\n",
+    "  --cwd <PATH>, -C      derive the watched log dir and rendezvous socket from\n",
+    "                        PATH instead of the current working directory\n",
     "  --log <PATH>          write diagnostics to PATH (default: no logging)\n",
-    "  --catch-up[=<MINS>]   render math from the last MINS minutes of history\n",
-    "                        before tailing (bare flag = 5 minutes)\n",
+    "  --catch-up[=<MINS>]   replay math from the last MINS minutes of completed\n",
+    "                        transcript before the live path (bare flag = 5 minutes)\n",
+    "  --install-hooks [--project|--project-local|--global]\n",
+    "                        merge laterm's two hook entries into settings.json\n",
+    "                        and exit. Default: --project-local, the personal,\n",
+    "                        untracked .claude/settings.local.json. --project\n",
+    "                        writes the shared/committed .claude/settings.json\n",
+    "  --hook <event>        forward a Claude Code hook payload to the running\n",
+    "                        window and exit (invoked BY Claude Code, not by you)\n",
     "  --version, -V         print version and exit\n",
     "  --help                show this help and exit\n",
 );
@@ -50,10 +64,27 @@ struct Args {
     catch_up: Option<i64>,
 }
 
-/// The outcome of parsing argv: run with the given args, show help, or show
-/// version. Help and version are distinct terminal actions, both exiting 0.
+/// Which settings.json `--install-hooks` writes: the repo-local tracked
+/// `.claude/settings.json`, the repo-local personal (untracked)
+/// `.claude/settings.local.json` (the default — never touch shared settings
+/// unless directed), or the user-global `~/.claude/settings.json`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum HookTarget {
+    Project,
+    ProjectLocal,
+    Global,
+}
+
+/// Usage error when more than one `--install-hooks` target flag is given.
+const TARGET_CONFLICT: &str = "only one of --project, --project-local, or --global may be given";
+
+/// The outcome of parsing argv. Each variant is a distinct terminal action.
 enum Invocation {
     Run(Args),
+    /// `--hook <event>`: forward the stdin payload and exit.
+    Hook(String),
+    /// `--install-hooks`: merge hook entries into settings.json and exit.
+    InstallHooks(HookTarget),
     Help,
     Version,
 }
@@ -66,13 +97,45 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
         log: None,
         catch_up: None,
     };
+    let mut install = false;
+    let mut target: Option<HookTarget> = None;
     let mut it = argv.into_iter();
+
+    // Set the install target, rejecting a second/conflicting target flag.
+    let set_target = |target: &mut Option<HookTarget>, t: HookTarget| -> Result<(), String> {
+        if target.is_some() {
+            return Err(TARGET_CONFLICT.to_string());
+        }
+        *target = Some(t);
+        Ok(())
+    };
 
     while let Some(arg) = it.next() {
         if arg == "--help" || arg == "-h" {
             return Ok(Invocation::Help);
         } else if arg == "--version" || arg == "-V" {
             return Ok(Invocation::Version);
+        } else if arg == "--hook" {
+            let event = it
+                .next()
+                .filter(|e| !e.is_empty())
+                .ok_or("--hook requires an event argument (UserPromptSubmit or Stop)")?;
+            return Ok(Invocation::Hook(event));
+        } else if let Some(event) = arg.strip_prefix("--hook=") {
+            if event.is_empty() {
+                return Err(
+                    "--hook requires an event argument (UserPromptSubmit or Stop)".to_string(),
+                );
+            }
+            return Ok(Invocation::Hook(event.to_string()));
+        } else if arg == "--install-hooks" {
+            install = true;
+        } else if arg == "--project" {
+            set_target(&mut target, HookTarget::Project)?;
+        } else if arg == "--project-local" {
+            set_target(&mut target, HookTarget::ProjectLocal)?;
+        } else if arg == "--global" {
+            set_target(&mut target, HookTarget::Global)?;
         } else if arg == "--cwd" || arg == "-C" {
             let path = it.next().ok_or("--cwd requires a path argument")?;
             args.cwd = Some(PathBuf::from(path));
@@ -104,6 +167,18 @@ fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
         }
     }
 
+    if install {
+        // Bare --install-hooks defaults to the personal, untracked slot — never
+        // touch shared/committed settings unless explicitly directed.
+        return Ok(Invocation::InstallHooks(
+            target.unwrap_or(HookTarget::ProjectLocal),
+        ));
+    }
+    if target.is_some() {
+        return Err(
+            "--project/--project-local/--global are only valid with --install-hooks".to_string(),
+        );
+    }
     Ok(Invocation::Run(args))
 }
 
@@ -122,6 +197,22 @@ fn run() -> i32 {
             println!("laterm {}", env!("CARGO_PKG_VERSION"));
             return 0;
         }
+        // Forward-and-exit: dispatched before ANY other startup work. Read the
+        // hook JSON from stdin, derive the rendezvous socket from the payload's
+        // cwd (the authoritative project dir), forward the raw bytes. On ANY
+        // failure (bad stdin, no cwd, no listener) exit 0 SILENTLY — never block
+        // or fail Claude Code — and write NOTHING to stdout.
+        Ok(Invocation::Hook(_event)) => {
+            let mut bytes = Vec::new();
+            if std::io::stdin().read_to_end(&mut bytes).is_err() {
+                return 0;
+            }
+            if let Some(cwd) = hook::payload_cwd(&bytes) {
+                let _ = ipc::forward(Path::new(&cwd), &bytes);
+            }
+            return 0;
+        }
+        Ok(Invocation::InstallHooks(target)) => return install_hooks(target),
         Err(e) => {
             eprint!("laterm: {e}\n\n{USAGE}");
             return 2;
@@ -130,9 +221,9 @@ fn run() -> i32 {
 
     // Honor `-C`/`--cwd` before anything reads the CWD. The existing
     // `current_dir()`-based derivation then yields the same canonical absolute
-    // path the OS gives Claude Code, so the dir-name mangling matches by
-    // construction (no manual canonicalization). Nothing before dir derivation
-    // depends on CWD (logging is explicit; protocol/theme don't use it).
+    // path the OS gives Claude Code, so the dir-name mangling (log dir + socket)
+    // matches by construction (no manual canonicalization). Nothing before dir
+    // derivation depends on CWD (logging is explicit; protocol/theme don't use it).
     if let Some(p) = &args.cwd
         && let Err(e) = std::env::set_current_dir(p)
     {
@@ -146,13 +237,15 @@ fn run() -> i32 {
         logging::init(path, logging::level_from_env());
     }
 
-    // Select the graphics protocol once — hard gate. The single selected
-    // protocol is shared (Arc) by the watch loop, catch-up, and the reader
-    // thread, so the DA1/sixel probe runs exactly once at startup.
+    // Select the graphics protocol once — hard gate. The single selected protocol
+    // is shared (Arc) by the listener loop, catch-up, and the reader thread, so
+    // the DA1/sixel probe runs exactly once at startup.
     let proto = match graphics::select() {
         Some(p) => Arc::new(p),
         None => {
-            eprintln!("laterm: terminal supports none of the kitty graphics, iTerm2 (imgcat), or sixel protocols; run inside a compatible terminal (kitty, ghostty, iTerm2, WezTerm, or a sixel-capable terminal)");
+            eprintln!(
+                "laterm: terminal supports none of the kitty graphics, iTerm2 (imgcat), or sixel protocols; run inside a compatible terminal (kitty, ghostty, iTerm2, WezTerm, or a sixel-capable terminal)"
+            );
             return 1;
         }
     };
@@ -166,26 +259,43 @@ fn run() -> i32 {
         sixel::detect_cell_height(BG_QUERY_TIMEOUT);
     }
 
-    // Derive log directory.
-    let dir = match project_log_dir() {
-        Ok(d) => d,
+    // Derive the working directory once; the log dir, the rendezvous socket, and
+    // the live-payload cwd filter all key off it.
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("laterm: {e}");
+            eprintln!("laterm: getwd: {e}");
             return 1;
         }
     };
+    let home = match ipc::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("laterm: home dir: not found");
+            return 1;
+        }
+    };
+    let dir = project_log_dir(&cwd, &home);
+    let socket = match ipc::socket_path(&cwd) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("laterm: cannot derive socket path: {e}");
+            return 1;
+        }
+    };
+    let watched_cwd = cwd.to_string_lossy().into_owned();
     logging::info(&format!("watching {}", dir.display()));
+    logging::info(&format!("socket {}", socket.display()));
 
-    // Startup line so the window doesn't look dead — standard terminal color,
-    // no role marker/SGR. main is allowed to write stdout. The watch dir is
-    // tilde-collapsed for legibility.
+    // Startup line so the window doesn't look dead — standard terminal color, no
+    // role marker/SGR. main is allowed to write stdout. The dir is tilde-collapsed.
     println!(
         "laterm {} monitoring {}/",
         env!("CARGO_PKG_VERSION"),
-        display_dir(&dir, dirs_home().as_deref())
+        display_dir(&dir, Some(&home))
     );
-    // If the dir isn't there yet the watcher waits (it does not exit); surface
-    // that as a not-yet signal, noting paste still works.
+    // The dir only gates `--catch-up`; the live listener runs regardless. Surface
+    // its absence as a not-yet signal, noting paste still works.
     if !dir.exists() {
         println!(
             "  no conversation log for this directory yet — paste to render, or start Claude Code here"
@@ -205,11 +315,11 @@ fn run() -> i32 {
         return 1;
     }
 
-    // Build the render context once: renders the reference "X" to derive the
-    // block threshold (1.5×) and proportional row sizing, and carries the proto.
+    // Build the render context once: renders the reference "X" to derive the block
+    // threshold (1.5×) and proportional row sizing, and carries the proto.
     let ctx = Arc::new(RenderCtx::new(proto));
 
-    // Stdout lock shared between watch loop and stdin thread.
+    // Stdout lock shared between the listener loop and the stdin thread.
     let out_mu: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Spawn stdin reader thread (paste-only manual input).
@@ -222,40 +332,192 @@ fn run() -> i32 {
         });
     }
 
-    // Replay recent history before tailing. The tailer is tail-only (records
-    // each file at its current end at startup), so it never re-renders these.
+    // Replay recent history before the live path begins. Catch-up reads completed
+    // transcripts read-only and never touches the socket, so live hook payloads
+    // (which arrive by push, not by tailing) are never double-emitted.
     if let Some(minutes) = args.catch_up {
         catch_up(&dir, minutes, &out_mu, &ctx);
     }
 
-    // Main watch loop.
-    let rx = watch::watch(dir, POLL_INTERVAL, shutdown.clone());
+    // Live path: the ipc listener yields one raw hook payload per connection.
+    let rx = match ipc::listen(&socket, shutdown.clone()) {
+        Ok(rx) => rx,
+        Err(e) => {
+            eprintln!("laterm: cannot bind socket {}: {e}", socket.display());
+            return 1;
+        }
+    };
+    logging::info("listening for hook payloads");
 
-    for line in &rx {
+    for payload in rx {
         if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
-        let segs = convo::extract(&line.data);
-        if segs.is_empty() {
+        // hook::parse drops payloads for another project (cwd mismatch),
+        // unrecognized events, empty content, and parse failures.
+        let Some(parsed) = hook::parse(&payload, &watched_cwd) else {
             continue;
-        }
-        // All segments of one entry share a role; mark and separate per entry.
-        let style = feed::role_style(&segs[0].role);
-        let texts: Vec<&str> = segs.iter().map(|s| s.text.as_str()).collect();
+        };
+        // Map the neutral parser role to feed's EntryStyle (the only place this
+        // mapping lives; hook stays free of any feed import).
+        let style = match parsed.role {
+            hook::Role::User => &feed::USER_STYLE,
+            hook::Role::Assistant => &feed::ASSISTANT_STYLE,
+        };
         let _lock = out_mu.lock().unwrap();
-        feed::emit_entry(style, &texts, &ctx);
+        feed::emit_entry(style, &[&parsed.text], &ctx);
     }
 
+    // Remove the socket file on exit (the accept loop also removes it; both ignore
+    // errors, so a double remove is harmless).
+    let _ = std::fs::remove_file(&socket);
+    0
+}
+
+/// Merge laterm's two hook entries into an existing `settings.json` value,
+/// additively and idempotently. `exe` is the absolute laterm path used in the
+/// command. Existing top-level keys and existing hook entries are preserved; a
+/// laterm entry is not duplicated on re-run. Pure (operates on a `serde_json`
+/// value) so it is unit-testable without touching a real settings file.
+fn merge_hooks(settings: Value, exe: &str) -> Value {
+    let mut root = match settings {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+
+    let hooks_val = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let hooks = match hooks_val {
+        Value::Object(m) => m,
+        other => {
+            *other = Value::Object(serde_json::Map::new());
+            other.as_object_mut().expect("just set to object")
+        }
+    };
+
+    for event in ["UserPromptSubmit", "Stop"] {
+        let command = format!("{exe} --hook {event}");
+        let arr_val = hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let arr = match arr_val {
+            Value::Array(a) => a,
+            other => {
+                *other = Value::Array(Vec::new());
+                other.as_array_mut().expect("just set to array")
+            }
+        };
+        if !arr.iter().any(|e| entry_has_command(e, &command)) {
+            arr.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
+        }
+    }
+
+    Value::Object(root)
+}
+
+/// Whether a `hooks.<Event>[]` element already carries `command` (the
+/// idempotency check for [`merge_hooks`]).
+fn entry_has_command(entry: &Value, command: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|inner| {
+            inner
+                .iter()
+                .any(|h| h.get("command").and_then(Value::as_str) == Some(command))
+        })
+}
+
+/// The settings.json path for `target`: repo-local tracked
+/// (`.claude/settings.json`), repo-local personal/untracked
+/// (`.claude/settings.local.json`), or user-global (`~/.claude/settings.json`).
+/// The project variants are relative to the working directory; only Global uses
+/// `home`. Pure, for unit testing.
+fn settings_file(target: HookTarget, home: &Path) -> PathBuf {
+    match target {
+        HookTarget::Project => PathBuf::from(".claude").join("settings.json"),
+        HookTarget::ProjectLocal => PathBuf::from(".claude").join("settings.local.json"),
+        HookTarget::Global => home.join(".claude").join("settings.json"),
+    }
+}
+
+/// `--install-hooks`: merge the two hook entries into the target settings.json
+/// and exit. Reads any existing file (a malformed one is an error, not clobbered),
+/// merges additively + idempotently, and writes it back pretty-printed.
+fn install_hooks(target: HookTarget) -> i32 {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("laterm: cannot determine executable path: {e}");
+            return 1;
+        }
+    };
+
+    let home = match ipc::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("laterm: home dir: not found");
+            return 1;
+        }
+    };
+    let settings_path = settings_file(target, &home);
+
+    let existing = match std::fs::read(&settings_path) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "laterm: {} is not valid JSON (refusing to clobber): {e}",
+                    settings_path.display()
+                );
+                return 1;
+            }
+        },
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => {
+            eprintln!("laterm: cannot read {}: {e}", settings_path.display());
+            return 1;
+        }
+    };
+
+    let merged = merge_hooks(existing, &exe);
+
+    if let Some(parent) = settings_path.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("laterm: cannot create {}: {e}", parent.display());
+        return 1;
+    }
+
+    let mut out = match serde_json::to_string_pretty(&merged) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("laterm: cannot serialize settings: {e}");
+            return 1;
+        }
+    };
+    out.push('\n');
+    if let Err(e) = std::fs::write(&settings_path, out) {
+        eprintln!("laterm: cannot write {}: {e}", settings_path.display());
+        return 1;
+    }
+
+    println!(
+        "laterm: installed UserPromptSubmit and Stop hooks in {}",
+        settings_path.display()
+    );
     0
 }
 
 /// Render math from conversation entries timestamped within the last `minutes`,
 /// across every *.jsonl file in `dir`, in timestamp order. Runs on the main
-/// thread before the tail watch starts.
+/// thread before the live listener starts.
 ///
 /// Each replayed entry is emitted with a single `emit_entry` call covering all
 /// its text segments — one marker-pair per entry — so caught-up framing is
-/// byte-identical to the live tail (which also emits once per jsonl entry).
+/// byte-identical to the live hook path (which also emits once per entry).
 fn catch_up(dir: &Path, minutes: i64, out_mu: &Mutex<()>, ctx: &RenderCtx) {
     let cutoff = Utc::now() - chrono::Duration::minutes(minutes);
 
@@ -267,12 +529,12 @@ fn catch_up(dir: &Path, minutes: i64, out_mu: &Mutex<()>, ctx: &RenderCtx) {
         }
     };
 
-    // One element per source jsonl entry, keeping its segments grouped so the
-    // emit framing matches the live path (one marker-pair per entry).
+    // One element per source jsonl entry, keeping its segments grouped so the emit
+    // framing matches the live path (one marker-pair per entry).
     let mut recent: Vec<(DateTime<Utc>, Vec<convo::Segment>)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !watch::is_jsonl(&path) {
+        if !convo::is_jsonl(&path) {
             continue;
         }
         let data = match std::fs::read(&path) {
@@ -313,8 +575,8 @@ fn catch_up(dir: &Path, minutes: i64, out_mu: &Mutex<()>, ctx: &RenderCtx) {
 /// Configure the render theme from the detected terminal background.
 ///
 /// When `opaque_bg` is false (kitty/imgcat) glyphs render on a transparent
-/// background. When true (sixel) the background is opaque: the detected
-/// terminal color (so the sixel box blends in) or white when undetected.
+/// background. When true (sixel) the background is opaque: the detected terminal
+/// color (so the sixel box blends in) or white when undetected.
 fn apply_theme(opaque_bg: bool) {
     match termbg::query(BG_QUERY_TIMEOUT) {
         None => {
@@ -357,17 +619,17 @@ fn within_window(timestamp: Option<&str>, cutoff: DateTime<Utc>) -> Option<DateT
     (ts >= cutoff).then_some(ts)
 }
 
-/// Derive the Claude Code conversation-log directory for the current working
-/// directory: ~/.claude/projects/<cwd with '/', '\', and ':' replaced by '-'>.
-fn project_log_dir() -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("getwd: {e}"))?;
-    let home = dirs_home().ok_or_else(|| "home dir: not found".to_string())?;
-    let name = cwd.to_string_lossy().replace(['/', '\\', ':'], "-");
-    Ok(home.join(".claude").join("projects").join(name))
+/// Derive the Claude Code conversation-log directory for `cwd`:
+/// `~/.claude/projects/<cwd with '/', '\', and ':' replaced by '-'>`. The
+/// dash-mangling is the single shared helper `ipc` uses for the socket filename,
+/// so the log dir and the rendezvous socket agree by construction.
+fn project_log_dir(cwd: &Path, home: &Path) -> PathBuf {
+    let name = ipc::mangle_dir(cwd);
+    home.join(".claude").join("projects").join(name)
 }
 
-/// Render `dir` for the startup line: if it is under `home`, collapse that
-/// prefix to `~`; otherwise show it unchanged. Uses the same home source as
+/// Render `dir` for the startup line: if it is under `home`, collapse that prefix
+/// to `~`; otherwise show it unchanged. Uses the same home source as
 /// [`project_log_dir`] so the collapse is consistent. Pure for unit testing.
 fn display_dir(dir: &Path, home: Option<&Path>) -> String {
     if let Some(home) = home
@@ -376,20 +638,6 @@ fn display_dir(dir: &Path, home: Option<&Path>) -> String {
         return format!("~/{}", rest.display());
     }
     dir.display().to_string()
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        // Claude Code on Windows stores data under %USERPROFILE%\.claude.
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]
@@ -434,6 +682,66 @@ mod tests {
     }
 
     #[test]
+    fn hook_requires_event() {
+        assert!(matches!(
+            parse_args(argv(&["--hook", "Stop"])),
+            Ok(Invocation::Hook(e)) if e == "Stop"
+        ));
+        assert!(matches!(
+            parse_args(argv(&["--hook=UserPromptSubmit"])),
+            Ok(Invocation::Hook(e)) if e == "UserPromptSubmit"
+        ));
+        assert!(parse_args(argv(&["--hook"])).is_err());
+        assert!(parse_args(argv(&["--hook", ""])).is_err());
+        assert!(parse_args(argv(&["--hook="])).is_err());
+    }
+
+    #[test]
+    fn install_hooks_default_and_targets() {
+        // Bare --install-hooks defaults to the personal, untracked slot.
+        assert!(matches!(
+            parse_args(argv(&["--install-hooks"])),
+            Ok(Invocation::InstallHooks(HookTarget::ProjectLocal))
+        ));
+        // Explicit --project still selects the shared/committed target.
+        assert!(matches!(
+            parse_args(argv(&["--install-hooks", "--project"])),
+            Ok(Invocation::InstallHooks(HookTarget::Project))
+        ));
+        assert!(matches!(
+            parse_args(argv(&["--install-hooks", "--project-local"])),
+            Ok(Invocation::InstallHooks(HookTarget::ProjectLocal))
+        ));
+        assert!(matches!(
+            parse_args(argv(&["--install-hooks", "--global"])),
+            Ok(Invocation::InstallHooks(HookTarget::Global))
+        ));
+        // A target flag without --install-hooks is an error.
+        assert!(parse_args(argv(&["--global"])).is_err());
+        assert!(parse_args(argv(&["--project-local"])).is_err());
+        // More than one target flag is a usage error.
+        assert!(parse_args(argv(&["--install-hooks", "--project", "--global"])).is_err());
+        assert!(parse_args(argv(&["--install-hooks", "--project-local", "--project"])).is_err());
+    }
+
+    #[test]
+    fn settings_file_resolves_per_target() {
+        let home = PathBuf::from("/home/x");
+        assert_eq!(
+            settings_file(HookTarget::Project, &home),
+            PathBuf::from(".claude").join("settings.json")
+        );
+        assert_eq!(
+            settings_file(HookTarget::ProjectLocal, &home),
+            PathBuf::from(".claude").join("settings.local.json")
+        );
+        assert_eq!(
+            settings_file(HookTarget::Global, &home),
+            PathBuf::from("/home/x").join(".claude").join("settings.json")
+        );
+    }
+
+    #[test]
     fn display_dir_collapses_under_home() {
         let home = PathBuf::from("/Users/benn");
         let dir = PathBuf::from("/Users/benn/.claude/projects/-Users-benn-projects-laterm");
@@ -452,14 +760,39 @@ mod tests {
     }
 
     #[test]
+    fn project_log_dir_uses_shared_mangling() {
+        let cwd = PathBuf::from("/Users/benn/projects/laterm");
+        let home = PathBuf::from("/Users/benn");
+        let dir = project_log_dir(&cwd, &home);
+        // The dir name is exactly the shared socket-mangling of the cwd, so the
+        // log dir and the rendezvous socket agree by construction.
+        assert_eq!(
+            dir.file_name().unwrap().to_str().unwrap(),
+            ipc::mangle_dir(&cwd)
+        );
+        assert_eq!(
+            dir,
+            home.join(".claude")
+                .join("projects")
+                .join("-Users-benn-projects-laterm")
+        );
+    }
+
+    #[test]
     fn help_returns_help_variant() {
-        assert!(matches!(parse_args(argv(&["--help"])), Ok(Invocation::Help)));
+        assert!(matches!(
+            parse_args(argv(&["--help"])),
+            Ok(Invocation::Help)
+        ));
         assert!(matches!(parse_args(argv(&["-h"])), Ok(Invocation::Help)));
     }
 
     #[test]
     fn version_returns_version_variant() {
-        assert!(matches!(parse_args(argv(&["--version"])), Ok(Invocation::Version)));
+        assert!(matches!(
+            parse_args(argv(&["--version"])),
+            Ok(Invocation::Version)
+        ));
         assert!(matches!(parse_args(argv(&["-V"])), Ok(Invocation::Version)));
     }
 
@@ -498,5 +831,87 @@ mod tests {
         assert!(within_window(Some("2026-05-27T11:59:59Z"), cutoff).is_none());
         assert!(within_window(Some("not-a-date"), cutoff).is_none());
         assert!(within_window(None, cutoff).is_none());
+    }
+
+    #[test]
+    fn merge_hooks_adds_both_and_is_idempotent() {
+        let exe = "/abs/laterm";
+        let once = merge_hooks(json!({}), exe);
+
+        let ups = once["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(
+            ups[0]["hooks"][0]["command"],
+            json!(format!("{exe} --hook UserPromptSubmit"))
+        );
+        assert_eq!(ups[0]["hooks"][0]["type"], json!("command"));
+        let stop = once["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(
+            stop[0]["hooks"][0]["command"],
+            json!(format!("{exe} --hook Stop"))
+        );
+
+        // Re-running does not duplicate.
+        let twice = merge_hooks(once.clone(), exe);
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn merge_hooks_preserves_unrelated_settings_and_events() {
+        let exe = "/abs/laterm";
+        let existing = json!({
+            "model": "sonnet",
+            "hooks": {
+                "PreToolUse": [ { "hooks": [ { "type": "command", "command": "other" } ] } ],
+                "Stop": [ { "hooks": [ { "type": "command", "command": "pre-existing" } ] } ]
+            }
+        });
+        let merged = merge_hooks(existing, exe);
+
+        // Unrelated top-level key preserved.
+        assert_eq!(merged["model"], json!("sonnet"));
+        // Unrelated hook event preserved.
+        assert_eq!(
+            merged["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            json!("other")
+        );
+        // laterm's Stop entry is appended alongside the pre-existing one, not
+        // clobbering it.
+        let stop = merged["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2);
+        assert_eq!(stop[0]["hooks"][0]["command"], json!("pre-existing"));
+        assert_eq!(
+            stop[1]["hooks"][0]["command"],
+            json!(format!("{exe} --hook Stop"))
+        );
+        // UserPromptSubmit is added fresh.
+        assert_eq!(
+            merged["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_hooks_preserves_settings_local_permissions_block() {
+        // A personal .claude/settings.local.json typically carries a permissions
+        // block; merging laterm's hooks must not disturb it.
+        let exe = "/abs/laterm";
+        let existing = json!({
+            "permissions": { "allow": ["Bash(ls:*)", "Read(//tmp/**)"], "deny": ["Bash(rm:*)"] }
+        });
+        let merged = merge_hooks(existing, exe);
+
+        assert_eq!(
+            merged["permissions"]["allow"],
+            json!(["Bash(ls:*)", "Read(//tmp/**)"])
+        );
+        assert_eq!(merged["permissions"]["deny"], json!(["Bash(rm:*)"]));
+        // laterm's hooks were still added.
+        assert!(merged["hooks"]["UserPromptSubmit"].is_array());
+        assert!(merged["hooks"]["Stop"].is_array());
     }
 }

@@ -276,10 +276,7 @@ mod tests {
         // AGENTS.md calls out this case explicitly.
         assert_eq!(scan(r"\\$x$"), vec![t(r"\\"), inl("x")]);
         // With surrounding text on both sides.
-        assert_eq!(
-            scan(r"a\\$x$b"),
-            vec![t(r"a\\"), inl("x"), t("b")]
-        );
+        assert_eq!(scan(r"a\\$x$b"), vec![t(r"a\\"), inl("x"), t("b")]);
     }
 
     #[test]

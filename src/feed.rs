@@ -2,13 +2,13 @@
 // rendered stdout feed — role markers, role-tinted prose, and math images.
 //
 // This module (and `input`) are the only ones that write to stdout. Cross-thread
-// serialization is the caller's responsibility: `main`'s watch loop, `catch_up`,
+// serialization is the caller's responsibility: `main`'s listener loop, `catch_up`,
 // and `input`'s reader thread each hold a shared output mutex while calling
 // `emit_entry`.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{graphics, logging, mathscan, render};
 

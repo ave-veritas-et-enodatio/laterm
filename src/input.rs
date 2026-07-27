@@ -7,11 +7,11 @@
 // and the pasted-entry render — always under the caller's shared output mutex.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::feed::{self, RenderCtx, PASTE_STYLE};
+use crate::feed::{self, PASTE_STYLE, RenderCtx};
 use crate::{logging, termbg};
 
 /// Enable bracketed paste (only the feed/input modules write stdout).
@@ -42,7 +42,9 @@ pub(crate) fn read_input(out_mu: &Mutex<()>, ctx: &RenderCtx, shutdown: &AtomicB
     let mut raw = match termbg::raw_input() {
         Some(r) => r,
         None => {
-            logging::warn("read_input: could not enter raw stdin mode; manual paste input disabled");
+            logging::warn(
+                "read_input: could not enter raw stdin mode; manual paste input disabled",
+            );
             return;
         }
     };
