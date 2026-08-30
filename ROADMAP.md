@@ -17,6 +17,10 @@ code and verified against it; what remains below is work on the **code**, where
 it diverges from a design ARCHITECTURE.md states correctly. Do not resolve any
 of these by editing the documents.
 
+### 0. `Makefile` - port to `justfile` and change project to use `just`
+
+we are only using it as a command alias phone book. That's textbook `just` territory.
+
 ### 1. `main` names a specific graphics protocol
 
 `src/main.rs:256` — `let opaque_bg = proto.name == "sixel";`
