@@ -25,8 +25,10 @@ nohup.out
 .claude/session-state.md
 # agent set might create a temp worktree
 .claude/worktrees/
+.claude/temp/
 
-# shared agents set up in Makefile
+# set up outside of this project (ick, but there are reasons)
+.claude/agents
 .claude/agents/
 .claude/commands/
 .claude/commands

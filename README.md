@@ -47,11 +47,12 @@ on Mac: `make dequarantine` first
 git clone https://github.com/ave-veritas-et-enodatio/laterm.git
 cd laterm
 make dist       # cross-build the per-platform binaries into dist/
-make install    # copy the right one to ~/bin/laterm
+make install    # copy the right one to ~/.local/bin/laterm
 ```
 
 `make install` selects the binary for your OS from `dist/`, copies it to
-`~/bin/laterm` (override with `INSTALL_DIR=...`), and on macOS removes the
+`~/.local/bin/laterm` (creating the directory if needed; override with
+`INSTALL_DIR=...`), and on macOS removes the
 quarantine attribute. It replaces any existing copy by removing it first (a
 fresh inode), which avoids a macOS code-signing cache quirk that otherwise
 `Killed:9`s an overwritten binary. Run `make dist` first so `dist/` is current.
@@ -197,6 +198,13 @@ panicking, so bad input degrades gracefully.
   query; terminals that do not answer (within 200 ms) get a black-on-white
   fallback rather than theme-matched glyphs.
 
+## Troubleshooting
+
+Symptoms that look like bugs but usually aren't — a stale binary on `PATH`,
+missing hook entries, terminal-specific sizing quirks — are collected under
+**Project-specific traps** in [AGENTS.md](AGENTS.md), along with what to check
+first for each.
+
 ## Building from Source
 
 Requires a Rust toolchain (stable).
@@ -209,12 +217,11 @@ make build    # debug build
 make release  # optimized build → target/release/laterm
 make test     # run unit tests
 make dist     # cross-build all three release targets into dist/
-make install  # copy the dist binary for this OS to ~/bin (INSTALL_DIR to override)
+make install  # copy the dist binary for this OS to ~/.local/bin (INSTALL_DIR to override)
 ```
 
-Plain `cargo build --release` and `cargo test` work too. The root Makefile is
-a thin wrapper over cargo; the Go prototype keeps its own Makefile under
-`prototype/` and is not part of the Rust build.
+Plain `cargo build --release` and `cargo test` work too — the Makefile is a thin
+wrapper over cargo.
 
 ## License
 
