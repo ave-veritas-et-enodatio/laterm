@@ -50,7 +50,7 @@ the dash-mangled project directory + `.sock`. **The mangling is the same helper
 that derives the transcript directory** (`ipc::mangle_dir`), not a copy of it —
 see §5.3.
 
-Windows named-pipe support is not yet implemented (§11.1).
+This transport is unix-only; Windows is unsupported (§11.1).
 
 ### 1.3 Runtime reference-X sizing
 
@@ -133,22 +133,29 @@ top-level `hooks` key, writes it back. The command string is `current_exe()` +
    so it mangles the OS-canonical absolute path and the transcript directory and
    socket path match by construction. No manual canonicalization anywhere.
 2. Initialize logging (`R-12`).
-3. Derive the transcript directory and, via `ipc`, the socket path — both from
+3. `graphics::select` once; exit with an error if `None` (`R-8.1`).
+4. `apply_theme` — `main`'s own function: query the background with
+   `termbg::query`, pick a contrasting glyph color, and hand both to
+   `render::set_theme` (`R-8.2`, `R-8.4`). When the selected protocol is sixel it
+   also sets `sixel::set_background` and calls
+   `sixel::detect_cell_height` (`R-8.3`).
+5. Derive the transcript directory and, via `ipc`, the socket path — both from
    the possibly-changed working directory, through one shared mangling helper.
-4. `graphics::select` once; exit with an error if `None` (`R-8.1`).
-5. `termbg::query` for the background; `render::apply_theme` (`R-8.2`).
-6. Build the `feed::RenderCtx` once — its constructor performs the reference-X
-   render (§1.3) and carries the protocol.
-7. Print the startup line, and the missing-directory warning if applicable
+   Protocol selection and theme come first deliberately: neither reads the
+   working directory, so nothing before this point can observe a stale one.
+6. Print the startup line, and the missing-directory warning if applicable
    (`R-9.6`, `R-9.7`).
-8. Spawn the stdin reader thread (`input::read_input`).
-9. If `--catch-up`: `convo::extract` over the transcript files, grouped by source
-   entry, each group through one `feed::emit_entry` (`R-3.5`).
-10. Run the `ipc` listener loop. Per payload: `hook::parse` → drop on `cwd`
+7. Register the `ctrlc` handler, which sets the shared cancellation flag
+   (`R-13.1`).
+8. Build the `feed::RenderCtx` once — its constructor performs the reference-X
+   render (§1.3) and carries the protocol.
+9. Spawn the stdin reader thread (`input::read_input`, given the output mutex,
+   the `RenderCtx`, and the cancellation flag).
+10. If `--catch-up`: `convo::parse` over the transcript files, grouped by source
+    entry, each group through one `feed::emit_entry` (`R-3.5`).
+11. Run the `ipc` listener loop. Per payload: `hook::parse` → drop on `cwd`
     mismatch (`R-2.6`) → map the parser's role enum to `feed`'s `EntryStyle` →
-    `feed::emit_entry` under the output mutex.
-11. `ctrlc` handler sets the cancellation flag; the listener unwinds and removes
-    the socket file (`R-13.1`).
+    `feed::emit_entry` under the output mutex. On exit, remove the socket file.
 
 `main` holds no rendering, parsing, marker, protocol, or transport logic. The
 role→`EntryStyle` mapping in step 10 lives here specifically so `hook` can stay
@@ -165,7 +172,10 @@ the `emit_entry`/`emit_segments` pipeline.
 `Text` written verbatim, `Math` through `render::render` then
 `ctx.proto.encode(png, rows)`. `RenderCtx` collapses what were three separate
 parameters (block threshold, reference height, protocol) into one value passed by
-reference.
+reference. An `at_line_start` cursor flag is threaded through `emit_segments` and
+back out; it is what decides close-marker placement (`R-6.3`), and it is set by
+both a block image and any text ending in a newline. `emit_entry` returns the
+number of math segments emitted, which `main` uses for the catch-up log line.
 
 Writes stdout **under the caller-held output mutex** — it takes no inner stdout
 lock, because the mutex is the cross-thread serializer between the listener loop
@@ -210,14 +220,16 @@ Three pieces, no laterm imports, no external crate, no JSON parsing:
 `ipc` is transport-only and `hook` is parse-only; they do not import each other.
 `main` sequences them.
 
-Platform-split like `termbg`: `std::os::unix::net` today, named pipe later
-(§11.1).
+Platform-split like `termbg`, and implemented for unix only:
+`std::os::unix::net` (§11.1).
 
 ### `hook` — pure payload parser
 
-Parses a hook payload into the same neutral `(role, text)` shape `convo::extract`
-returns. `role` is a parser-local enum, **not** `feed`'s `EntryStyle` — that
-mapping is `main`'s, which is what keeps this module import-free.
+Parses a hook payload into `Parsed { role, text, cwd }`. `role` is a
+parser-local enum, **not** `feed`'s `EntryStyle` — that mapping is `main`'s,
+which is what keeps this module import-free. (`convo` returns a different shape,
+`ParsedEntry`, carrying a timestamp and per-segment role strings; the two
+parsers are neutral in the same *sense*, but their types are not shared.)
 
 - `parse(bytes, watched_cwd)` — full parse with the `cwd` filter (`R-2.6`,
   `R-2.7`).
@@ -229,19 +241,26 @@ Uses `serde` + `serde_json`. Never panics.
 
 ### `convo` — historical jsonl parser (catch-up only)
 
-The only surviving jsonl-parse path; not on the live path. Extracts text from
-`user` and `assistant` entries per `R-3.4`, handling both the array-of-blocks and
-plain-string `message.content` forms. Owns `is_jsonl(path)`, the pure path
-predicate used by catch-up's directory scan (it moved here from the deleted
-`watch` module).
+The only surviving jsonl-parse path; not on the live path.
+`parse(line) -> Option<ParsedEntry>` returns the entry's RFC 3339 timestamp
+(which `main` needs for the `R-3.2` window) alongside its text `Segment`s, each
+carrying a role string. Handles both the array-of-blocks and plain-string
+`message.content` forms per `R-3.4`, and returns `None` when an entry yields no
+segments — so `main` can index the first segment for the entry's role without a
+bounds check. Owns `is_jsonl(path)`, the pure path predicate used by catch-up's
+directory scan (it moved here from the deleted `watch` module, along with
+`extract`, the live-tail entry point the hook pivot removed).
 
 Uses `serde_json`. Never panics. No laterm imports.
 
 ### `mathscan` — delimiter scanner
 
-`scan(&str) -> Vec<Segment>`, where `Segment` is `Text(String)` or `Math { expr,
-display }`. Flat, document-order, lossless (`R-5.6`) — no anchor windowing, no
-neighbor-context logic, no trimming. Returns an empty vec only for empty input.
+`scan(&str) -> Vec<Segment>`, where `Segment` is a struct
+`{ kind: Kind, text: String, display: bool }` and `Kind` is `Text | Math`. For
+`Text`, `text` is verbatim source and `display` is unused; for `Math`, `text` is
+the inner expression with delimiters stripped and whitespace trimmed (`R-5.6`).
+Flat and document-order — no anchor windowing, no neighbor-context logic.
+Returns an empty vec only for empty input.
 
 No laterm imports.
 
@@ -447,10 +466,10 @@ Claude Code (per turn)
                : inline: proto.encode(png, rows) in flow
   v
   bold open marker + tinted body + neutral images
-    + bold close marker (inline, or own line if image-final)
+    + bold close marker (inline, or own line if at column 0)
     + color reset + blank line
 
-catch-up:  *.jsonl -> convo::extract -> grouped per source entry
+catch-up:  *.jsonl -> convo::parse -> grouped per source entry
            -> one feed::emit_entry each  (framing identical to live)
 paste:     input::PasteParser -> feed::emit_entry(PASTE_STYLE, ...)
 ```
@@ -546,8 +565,7 @@ No dependency may be added without an entry here.
 | `libc` v0.2 | `termbg`, `logging` (unix only, `[target.'cfg(unix)']`) | termios raw mode + `select(2)` for terminal queries; `ioctl(TIOCGWINSZ)` for width; `flock(LOCK_EX \| LOCK_NB)` for the log writer claim |
 | `windows-sys` v0.59 | `termbg`, `logging` (Windows only, `[target.'cfg(windows)']`) | Console API (`GetStdHandle`, `SetConsoleMode`, `WaitForSingleObject`, `ReadConsoleA`, `WriteConsoleA`) for the terminal queries; `GetConsoleScreenBufferInfo` for width; `INVALID_HANDLE_VALUE`; `FILE_SHARE_READ` (feature `Win32_Storage_FileSystem`) |
 
-The UDS transport adds no crate (`std::os::unix::net`). The Windows named-pipe
-follow-up (§11.1) is expected to reuse `windows-sys`, already present.
+The UDS transport adds no crate (`std::os::unix::net`).
 
 ---
 
@@ -558,8 +576,7 @@ Where confidence is cheapest, given this decomposition.
 **Pure and deterministic — test hard, no terminal needed.** `mathscan`, `hook`,
 `convo`, and `ipc::socket_path` import nothing of laterm and touch no I/O. They
 carry the parsing correctness of `R-5`, `R-2.7`, and `R-3.4`, and they are the
-highest-value unit-test and fuzz surface in the crate. Rust fuzz targets for
-`mathscan`, `hook`, and `convo` remain a good addition.
+highest-value unit-test and fuzz surface in the crate.
 
 Fixture payloads worth covering: `UserPromptSubmit` and `Stop`, `cwd` match and
 mismatch, unknown event, empty content, malformed JSON. For `socket_path`, that
@@ -584,9 +601,8 @@ Known shortfalls of *this implementation* against SPEC.md. Distinct from SPEC.md
 ### 11.1 Windows live path not implemented
 
 `ipc` is Unix-domain-socket only. On Windows, `--hook`, `--install-hooks`, and
-live rendering do not work; a named-pipe transport is the planned follow-up. The
-module is already platform-split in the shape `termbg` uses, so the change is
-confined to `ipc`.
+live rendering do not work. The module is platform-split in the shape `termbg`
+uses, with the Windows half unimplemented.
 
 Paste, graphics protocol selection (Sixel via DA1), and `termbg` are at full
 parity on Windows and are unaffected.
@@ -600,4 +616,4 @@ detected) a whole number of character cells. It is never scaled down or up to a
 target row count.
 
 This is a partial shortfall against `R-7.2`: on a Sixel terminal, math does not
-track the terminal's text size. Closing it means resampling in the encoder.
+track the terminal's text size.

@@ -130,8 +130,8 @@ paste text to render in the meantime.
 Two limitations worth knowing: the `Stop` hook delivers only the turn's **final**
 assistant text, so assistant prose written *before* a tool call within the same
 turn is not shown live (it is still visible via `--catch-up`, which reads the
-completed transcript). And the live hook path is unix-first — the Windows
-transport (a named pipe) is a planned follow-up.
+completed transcript). And the live hook path is unix-only — it does not work on
+Windows.
 
 Output is a **full echo**: the conversation text is mirrored verbatim, with each
 math expression rendered as an image in place. Each entry is bracketed by a
@@ -189,9 +189,9 @@ panicking, so bad input degrades gracefully.
   turn's final assistant text, so assistant prose written before a tool call in
   the same turn is not rendered live; `--catch-up` on the completed transcript
   does show it.
-- **Windows live path is a planned follow-up.** The hook transport is a
-  Unix-domain socket (unix-first); on Windows, live rendering and
-  `--install-hooks`/`--hook` are not yet available. Paste still works.
+- **No Windows live path.** The hook transport is a Unix-domain socket; on
+  Windows, live rendering and `--install-hooks`/`--hook` do not work. Paste
+  still works. (See [ROADMAP.md](ROADMAP.md).)
 - **Hooks must be installed.** Without `laterm --install-hooks`, Claude Code
   pushes nothing and only `--catch-up` and manual paste render anything.
 - **Background detection is best-effort.** Glyph contrast relies on an OSC 11

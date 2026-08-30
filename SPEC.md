@@ -245,9 +245,13 @@ and every consumer of one has a defined fallback (R-8.2, R-8.4).
 - **R-5.5** Multiple spans on one line MUST each be recognized, in document
   order, with the text between them preserved between them. No span may be
   duplicated or dropped.
-- **R-5.6** Scanning MUST be lossless: the segments produced for an input
-  concatenate back to that exact input, including newlines and text on lines
-  containing no math. Nothing is trimmed, windowed, or discarded.
+- **R-5.6** Scanning MUST NOT drop content. Every part of the input is
+  represented in exactly one segment, including newlines and text on lines
+  containing no math — there is no windowing, anchoring, or discarding. Text
+  segments hold their source verbatim. Math segments hold the **inner
+  expression only**: the delimiters are stripped and surrounding whitespace is
+  trimmed, so the segment stream is not a byte-for-byte round trip of an input
+  containing math.
 
 ### R-6 — Output format
 
@@ -262,9 +266,10 @@ and every consumer of one has a defined fallback (R-8.2, R-8.4).
   | assistant | `[a]> ` | `<[a]` | bold cyan |
   | paste | `{p}> ` | `<{p}` | bold magenta |
 
-- **R-6.3** The closing marker is appended to the end of the entry's last line,
-  separated by a space, when the entry ends mid-line; it falls to its own line
-  when the entry ends in a block image.
+- **R-6.3** Placement of the closing marker follows the cursor: when the entry's
+  content ends mid-line it is appended to that line, separated by a space; when
+  the content ends at column 0 — after a block image, or after text ending in a
+  newline — it falls to its own line.
 - **R-6.4** An entry's prose MUST be tinted in the role's non-bold color, so the
   entry stays identifiable at any scroll position. Bold markers are the primary
   role signal and the colorblind backstop; the tint is a secondary orientation
@@ -301,8 +306,10 @@ and every consumer of one has a defined fallback (R-8.2, R-8.4).
   hard-coded pixel counts. If that measurement fails, an implementation-defined
   fallback is used.
 - **R-7.5** **A rendering failure MUST NOT be fatal, and MUST NOT lose content.**
-  On any parse or render error the raw LaTeX MUST be passed through as text,
-  with its delimiters, and processing MUST continue with the next segment. The
+  On any parse or render error the expression MUST be passed through as text,
+  re-delimited so it remains recognizable as math (`$…$` inline, `$$…$$`
+  display — the original delimiter spelling is not preserved, since `R-5.6`
+  did not retain it), and processing MUST continue with the next segment. The
   process MUST NOT exit because a span failed to render.
 - **R-7.6** A rendered image exceeding 4096 × 4096 px MUST be rejected and
   handled as a rendering failure per R-7.5.
@@ -347,6 +354,9 @@ and every consumer of one has a defined fallback (R-8.2, R-8.4).
   | `--version`, `-V` | Print version and exit. |
   | `--help`, `-h` | Print usage and exit. |
 
+  A flag taking an argument MUST accept both the separated (`--log PATH`) and
+  the `=`-joined (`--log=PATH`) spelling.
+
 - **R-9.2** `-C`/`--cwd` MUST change the directory used to derive **both** the
   watched transcript location and the rendezvous point, and MUST take effect
   before either is derived — so the two cannot disagree. A failure to change
@@ -355,7 +365,7 @@ and every consumer of one has a defined fallback (R-8.2, R-8.4).
   requires one, MUST print usage to stderr and exit non-zero. `--hook` mode is
   the sole exception (R-2.4): a missing renderer is a silent exit 0.
 - **R-9.4** `--install-hooks` accepts at most one scope flag; more than one is a
-  usage error.
+  usage error, as is a scope flag given without `--install-hooks`.
 - **R-9.5** If the process working directory cannot be determined, LaTerm MUST
   print an error to stderr and exit non-zero.
 - **R-9.6** **Startup line.** After selecting a protocol and deriving the
@@ -479,12 +489,5 @@ LaTerm is not, and does not aim to be:
 ## 7. Verification
 
 Every requirement above is stated in observable terms and is the acceptance
-criterion for itself. Priority order for implementation and for test coverage:
-
-1. **Process model, startup, and the live transport** — R-1, R-2, R-8.1, R-9,
-   R-10, R-11. Nothing else is reachable until a turn arrives in a window.
-2. **Parsing** — R-5 (math scanning), R-2.7/R-3.4 (payload and transcript
-   parsing). Pure, deterministic, and unit-testable without a terminal: the
-   cheapest place to buy confidence.
-3. **Rendering and output format** — R-6, R-7, R-8.2–R-8.5.
-4. **Auxiliary paths** — R-3 (catch-up), R-4 (paste), R-12 (logging), R-13.
+criterion for itself. There is no separate acceptance-criteria list to keep in
+sync.
