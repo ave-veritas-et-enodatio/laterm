@@ -80,12 +80,6 @@ implementation is a named pipe.
 
 Until this lands, SPEC.md `R-2` is satisfied on unix only.
 
-### License selection
-
-The project has no stated license. `Cargo.toml` declares `license = "MIT"`, but
-README.md's License section is empty — these need to be reconciled and the
-chosen license actually added.
-
 ---
 
 ## Wanted

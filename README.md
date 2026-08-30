@@ -225,7 +225,7 @@ wrapper over cargo.
 
 ## License
 
-<!-- TODO: add license -->
+MIT — see [LICENSE](LICENSE).
 
 ## Third Party Acknowledgements
 
