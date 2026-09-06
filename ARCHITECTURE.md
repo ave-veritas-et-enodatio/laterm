@@ -1,4 +1,4 @@
-# ARCHITECTURE.md — LaTerm
+# ARCHITECTURE — LaTerm
 
 **How this implementation satisfies [SPEC.md](SPEC.md).** SPEC.md defines what
 LaTerm must do; this document defines the Rust program that does it. Everything

@@ -1,4 +1,4 @@
-# CONVENTIONS.md — LaTerm
+# CONVENTIONS — LaTerm
 
 House rules for working in this repository. Everything here is specific to
 LaTerm — general engineering practice lives in your agent definition, and is not

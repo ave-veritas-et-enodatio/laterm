@@ -1,4 +1,4 @@
-# ROADMAP.md — LaTerm
+# ROADMAP — LaTerm
 
 Future intent. **Outside the contract-document precedence chain** (SPEC.md >
 ARCHITECTURE.md > CONVENTIONS.md > code): read this for planning, never as a

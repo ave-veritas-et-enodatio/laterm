@@ -1,4 +1,4 @@
-# LaTerm
+# README — LaTerm
 
 A Claude Code sidecar that renders the active conversation's LaTeX math
 expressions as inline images in a separate terminal window.
