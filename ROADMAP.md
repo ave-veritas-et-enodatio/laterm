@@ -1,7 +1,7 @@
 # ROADMAP.md — LaTerm
 
 Future intent. **Outside the contract-document precedence chain** (SPEC.md >
-ARCHITECTURE.md > AGENTS.md > code): read this for planning, never as a
+ARCHITECTURE.md > CONVENTIONS.md > code): read this for planning, never as a
 specification. Nothing here is a requirement, and nothing here describes how
 laterm behaves today — the contract documents own the now.
 

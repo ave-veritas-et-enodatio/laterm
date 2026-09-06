@@ -202,7 +202,7 @@ panicking, so bad input degrades gracefully.
 
 Symptoms that look like bugs but usually aren't — a stale binary on `PATH`,
 missing hook entries, terminal-specific sizing quirks — are collected under
-**Project-specific traps** in [AGENTS.md](AGENTS.md), along with what to check
+**Project-specific traps** in [CONVENTIONS.md](CONVENTIONS.md), along with what to check
 first for each.
 
 ## Building from Source

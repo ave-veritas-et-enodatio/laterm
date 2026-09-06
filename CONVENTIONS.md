@@ -1,4 +1,4 @@
-# AGENTS.md — LaTerm
+# CONVENTIONS.md — LaTerm
 
 House rules for working in this repository. Everything here is specific to
 LaTerm — general engineering practice lives in your agent definition, and is not
@@ -15,7 +15,7 @@ how this project accumulates contradictions.
 |---|---|---|
 | **SPEC.md** | What must be true for this to *be* LaTerm | Governs everything below it |
 | **ARCHITECTURE.md** | How this Rust program achieves that | Governs the code |
-| **AGENTS.md** | How we work here | This file |
+| **CONVENTIONS.md** | How we work here | This file |
 | **the code** | The running expression of ARCHITECTURE.md | Governs nothing — it is the thing being governed |
 
 **Read SPEC.md and ARCHITECTURE.md before changing behavior.** Neither is

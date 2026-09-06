@@ -451,7 +451,7 @@ iteration across platforms vs. what ships.
 **`make install`** goes to `~/.local/bin` (`INSTALL_DIR ?= $(HOME)/.local/bin`),
 creating the directory if absent, removing the existing binary before copying
 (fresh inode), and clearing the macOS quarantine attribute. The removal is not
-cosmetic — see AGENTS.md. The destination is load-bearing: `--install-hooks`
+cosmetic — see CONVENTIONS.md. The destination is load-bearing: `--install-hooks`
 bakes `current_exe()` into settings as an absolute path (`R-10.2`), so hooks
 installed from one location keep pointing there after the binary moves.
 
